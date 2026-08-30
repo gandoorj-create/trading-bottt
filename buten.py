@@ -25,7 +25,7 @@ SYMBOLS_POOL = [
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "MATICUSDT", "LINKUSDT",
     "DOTUSDT", "UNIUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT"
 ]
-SELECTION_INTERVAL_HOURS = 12   # 12 цаг тутам coin сонголт
+SELECTION_INTERVAL_HOURS = 6   # 6 цаг тутам coin сонголт
 MONITOR_INTERVAL_SEC = 60       # 1 минут тутам позиц хянах
 TRADE_ALLOCATION = 0.20         # Дансны 20%
 STOP_LOSS_PCT = 2.0             # 2% SL
