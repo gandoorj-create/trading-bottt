@@ -30,36 +30,31 @@ SELECTION_INTERVAL_MINUTES = 360       # 6 ЦАГ
 MONITOR_INTERVAL_SEC = 60              # 1 минут
 TELEGRAM_REPORT_INTERVAL_SEC = 300     # 5 МИНУТ
 
-TRADE_ALLOCATION = 0.20              
+# ✅ 6 койн, тус бүрд 16.67% (нийт 100%)
+TRADE_ALLOCATION = 0.1667              
 STOP_LOSS_PCT = 2.0                 
 TAKE_PROFIT_PCT = 1.0               
-MAX_SELECTIONS = 5                  
+MAX_SELECTIONS = 6                   # 6 койн сонгох
 
 # ==========================================================
-# 🔐 ГАРЫН ҮСЭГ
+# 🔐 ГАРЫН ҮСЭГ (өмнөхтэй адил, богиносгосон)
 # ==========================================================
 def get_signature(params_str, secret):
     return hmac.new(secret.encode('utf-8'), params_str.encode('utf-8'), hashlib.sha256).hexdigest()
 
 def send_signed_request(method, endpoint, params=None):
     timestamp = int(time.time() * 1000)
-    if params is None:
-        params = {}
+    if params is None: params = {}
     params['timestamp'] = timestamp
     params['recvWindow'] = 5000
     query_str = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
     signature = get_signature(query_str, API_SECRET)
     url = f"{BASE_URL}{endpoint}?{query_str}&signature={signature}"
     headers = {"X-MBX-APIKEY": API_KEY}
-
-    if method.upper() == "GET":
-        resp = requests.get(url, headers=headers)
-    elif method.upper() == "POST":
-        resp = requests.post(url, headers=headers)
-    elif method.upper() == "DELETE":
-        resp = requests.delete(url, headers=headers)
-    else:
-        raise ValueError("Unsupported method")
+    if method.upper() == "GET": resp = requests.get(url, headers=headers)
+    elif method.upper() == "POST": resp = requests.post(url, headers=headers)
+    elif method.upper() == "DELETE": resp = requests.delete(url, headers=headers)
+    else: raise ValueError("Unsupported method")
     return resp.json()
 
 def send_public_request(endpoint, params=None):
@@ -156,6 +151,11 @@ def calculate_atr_pct(df, period=14):
 def get_avg_volume(df, period=10):
     return df['volume'].iloc[-period:].mean()
 
+def calculate_ema_slope(df, period=50):
+    ema = df['close'].ewm(span=period).mean()
+    slope = (ema.iloc[-1] - ema.iloc[-5]) / ema.iloc[-5] * 100
+    return slope
+
 def analyze_coin(symbol):
     try:
         df = get_klines(symbol, interval="1h", limit=100)
@@ -164,56 +164,106 @@ def analyze_coin(symbol):
         atr_pct = calculate_atr_pct(df)
         volume = get_avg_volume(df)
         price = df['close'].iloc[-1]
-
-        score = 0
-        if 0.3 <= atr_pct <= 1.5: score += 30
-        if adx > 25: score += 30
-        elif adx < 18: score += 20
-        if volume > 1000: score += 20
-        if 30 < rsi < 70: score += 20
-
-        if adx >= 25: regime = "TRENDING"
-        elif adx <= 18: regime = "RANGE-BOUND"
-        else: regime = "TRANSITIONAL"
-
+        ema_slope = calculate_ema_slope(df)
+        
+        # Стратегийн тохирлыг тодорхойлох
+        strategy_suitability = {}
+        
+        # 1. EMA CROSSOVER - Тренд тодорхой (ADX > 25)
+        if adx > 25:
+            strategy_suitability['EMA_CROSSOVER'] = adx * 2 + (ema_slope * 5 if ema_slope > 0 else 0)
+        
+        # 2. MACD MOMENTUM - Тренд сул (ADX 20-25)
+        if 20 <= adx <= 25:
+            strategy_suitability['MACD_MOMENTUM'] = (adx - 15) * 3 + (atr_pct * 10 if atr_pct > 0.3 else 0)
+        
+        # 3. GRID TRADING - RANGE-BOUND (ADX < 18) + хэлбэлзэл > 0.3%
+        if adx < 18 and atr_pct > 0.3:
+            strategy_suitability['GRID_TRADING'] = (18 - adx) * 2 + atr_pct * 20
+        
+        # 4. BOLLINGER MEAN REVERSION - RANGE-BOUND + хэлбэлзэл > 0.5%
+        if adx < 18 and atr_pct > 0.5:
+            strategy_suitability['BOLLINGER_MEAN_REVERSION'] = (18 - adx) * 1.5 + atr_pct * 15
+        
+        # 5. RSI STRATEGY - RSI хэт туйлширсан (< 30 эсвэл > 70)
+        if rsi < 35 or rsi > 65:
+            rsi_score = (35 - rsi) * 3 if rsi < 35 else (rsi - 65) * 3
+            strategy_suitability['RSI_STRATEGY'] = rsi_score + atr_pct * 10
+        
+        # 6. TREND FOLLOWING - Хүчтэй тренд (ADX > 30) + EMA налуу
+        if adx > 30 and abs(ema_slope) > 0.5:
+            strategy_suitability['TREND_FOLLOWING'] = adx * 1.5 + abs(ema_slope) * 10
+        
+        # Хамгийн тохирсон стратегийг сонгох
+        if strategy_suitability:
+            best_strategy = max(strategy_suitability, key=strategy_suitability.get)
+            best_score = strategy_suitability[best_strategy]
+        else:
+            best_strategy = "HOLD"
+            best_score = 0
+        
         return {
-            'symbol': symbol, 'price': price, 'adx': adx, 'rsi': rsi,
-            'atr_pct': atr_pct, 'volume': volume, 'regime': regime, 'score': score
+            'symbol': symbol,
+            'price': price,
+            'adx': adx,
+            'rsi': rsi,
+            'atr_pct': atr_pct,
+            'volume': volume,
+            'regime': "TRENDING" if adx > 25 else "RANGE-BOUND" if adx < 18 else "TRANSITIONAL",
+            'score': best_score,
+            'strategy': best_strategy
         }
     except Exception as e:
         print(f"❌ analyze_coin error for {symbol}: {e}")
         return None
 
-def select_strategy(coin_data):
-    regime = coin_data['regime']
-    if regime == "TRENDING": return "EMA_CROSSOVER"
-    elif regime == "RANGE-BOUND":
-        return "GRID_TRADING" if coin_data['atr_pct'] > 0.5 else "BOLLINGER_MEAN_REVERSION"
-    else: return "HOLD"
-
-def screen_coins():
-    print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] Койн шинжилж байна...")
-    results = []
+def screen_coins_by_strategy():
+    """
+    Стратеги тус бүрд хамгийн тохирох 1 койныг сонгоно.
+    Нийт 6 стратеги, 6 койн буцаана.
+    """
+    print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] Стратеги тус бүрт койн шинжилж байна...")
+    
+    # 1. Бүх койнд шинжилгээ хийх
+    all_results = []
     for sym in SYMBOLS_POOL:
         data = analyze_coin(sym)
-        if data: results.append(data)
-
-    results.sort(key=lambda x: x['score'], reverse=True)
-
+        if data:
+            all_results.append(data)
+    
+    # 2. Стратеги тус бүрд хамгийн өндөр оноотой койныг сонгох
     selected = []
-    selected_symbols = set()
-    for coin in results:
-        if coin['symbol'] not in selected_symbols:
-            selected.append(coin)
-            selected_symbols.add(coin['symbol'])
-            if len(selected) >= MAX_SELECTIONS: break
-
-    print("🏆 Шилдэг 5 койн:")
+    used_symbols = set()
+    strategy_list = ["EMA_CROSSOVER", "MACD_MOMENTUM", "GRID_TRADING", 
+                     "BOLLINGER_MEAN_REVERSION", "RSI_STRATEGY", "TREND_FOLLOWING"]
+    
+    for strategy in strategy_list:
+        # Тухайн стратегид тохирох койнуудыг шүүх
+        candidates = [c for c in all_results if c['strategy'] == strategy and c['symbol'] not in used_symbols]
+        if candidates:
+            # Хамгийн өндөр оноотойг сонгох
+            best = max(candidates, key=lambda x: x['score'])
+            selected.append(best)
+            used_symbols.add(best['symbol'])
+        else:
+            # Хэрэв тухайн стратегид тохирох койн байхгүй бол хамгийн өндөр оноотой ерөнхий койныг сонгох
+            remaining = [c for c in all_results if c['symbol'] not in used_symbols]
+            if remaining:
+                best = max(remaining, key=lambda x: x['score'])
+                # Стратегийг нь хүчээр оноох
+                best['strategy'] = strategy
+                selected.append(best)
+                used_symbols.add(best['symbol'])
+    
+    print("🏆 Стратеги тус бүрт сонгогдсон койнууд:")
     for i, coin in enumerate(selected, 1):
-        print(f"   {i}. {coin['symbol']} | Оноо: {coin['score']} | Төлөв: {coin['regime']}")
-
+        print(f"   {i}. {coin['symbol']} | Стратеги: {coin['strategy']} | Оноо: {coin['score']:.1f}")
+    
     return selected
 
+# ==========================================================
+# 📱 TELEGRAM ХОЛБОО
+# ==========================================================
 def send_telegram(text, pin=False):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -229,9 +279,9 @@ def send_telegram(text, pin=False):
                     pin_payload = {"chat_id": CHAT_ID, "message_id": message_id}
                     pin_resp = requests.post(pin_url, json=pin_payload, timeout=10)
                     if pin_resp.status_code == 200:
-                        print("📌 Зурвас бэхлэгдлээ (pin).")
+                        print("📌 Зурвас бэхлэгдлээ.")
                     else:
-                        print(f"❌ Бэхлэхэд алдаа: {pin_resp.status_code} - {pin_resp.text}")
+                        print(f"❌ Бэхлэхэд алдаа: {pin_resp.text}")
                 else:
                     print(f"❌ Илгээхэд алдаа: {result}")
         else:
@@ -239,6 +289,9 @@ def send_telegram(text, pin=False):
     except Exception as e:
         print(f"❌ Telegram илгээхэд алдаа: {e}")
 
+# ==========================================================
+# 💼 ЗАХИАЛГА ГҮЙЦЭТГЭХ (6 КОЙН, 16.67% ТУС БҮР)
+# ==========================================================
 def execute_trades(selected_coins, total_balance):
     if not selected_coins:
         send_telegram("⚠️ *КОЙН СОНГОГДООГҮЙ*\n━━━━━━━━━━━━━━━━━\nКойн шинжилгээ амжилтгүй боллоо.")
@@ -248,8 +301,8 @@ def execute_trades(selected_coins, total_balance):
     for coin_data in selected_coins:
         symbol = coin_data['symbol']
         price = coin_data['price']
-        strategy = select_strategy(coin_data)
-
+        strategy = coin_data['strategy']
+        
         if strategy == "HOLD":
             print(f"⏸️ {symbol}: ХҮЛЭЭХ төлөв")
             continue
@@ -258,6 +311,7 @@ def execute_trades(selected_coins, total_balance):
             send_telegram(f"⚠️ *ҮЛДЭГДЭЛ ХАНГАЛТГҮЙ*\n━━━━━━━━━━━━━━━━━\nUSDT: `${total_balance:.2f}`\nХамгийн багадаа $10 байх ёстой.")
             return
 
+        # ✅ 6 койн тул 16.67%
         allocation_usdt = total_balance * TRADE_ALLOCATION
         quantity = round(allocation_usdt / price, 3)
 
@@ -283,7 +337,7 @@ def execute_trades(selected_coins, total_balance):
                f"💰 Нээсэн үнэ: `${entry_price:,.2f}`\n🛑 Алдагдал хязгаар (SL): `${sl_price:,.2f}` (-{STOP_LOSS_PCT}%)\n"
                f"🎯 Ашиг түгжих (TP): `${tp_price:,.2f}` (+{TAKE_PROFIT_PCT}%)\n"
                f"📦 Хэмжээ: `{quantity}` {symbol.replace('USDT','')}\n"
-               f"💵 Зарцуулсан: `${allocation_usdt:,.2f}` ({TRADE_ALLOCATION*100}% of balance)\n"
+               f"💵 Зарцуулсан: `${allocation_usdt:,.2f}` ({TRADE_ALLOCATION*100:.2f}% of balance)\n"
                f"⏰ Цаг: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         send_telegram(msg)
         time.sleep(1)
@@ -291,6 +345,9 @@ def execute_trades(selected_coins, total_balance):
     if not any_trade_opened:
         send_telegram("⏳ *АРИЛЖАА ХИЙГДЭЭГҮЙ*\n━━━━━━━━━━━━━━━━━\nСонгогдсон бүх койн `HOLD` төлөвтэй эсвэл хэмжээ хэтэрхий бага байна.")
 
+# ==========================================================
+# 📊 ПОЗИЦ ХЯНАХ (5 МИНУТ ТУТАМ)
+# ==========================================================
 last_telegram_report_time = 0
 
 def monitor_positions():
@@ -312,6 +369,9 @@ def monitor_positions():
         send_telegram(msg)
         last_telegram_report_time = current_time
 
+# ==========================================================
+# 🔄 ЦИКЛИЙН ХУРААНГУЙ (6 ЦАГ ТУТАМ)
+# ==========================================================
 cycle_start_time = time.time()
 cycle_realized_pnl = 0.0
 last_balance = 0.0
@@ -333,27 +393,27 @@ def send_cycle_summary():
     last_balance = current_balance
 
 # ==========================================================
-# 🚀 ҮНДСЭН ГОГЦОО (ЭХЛЭЛД ШУУД КОЙН ШИНЖИЛГЭЭ ХИЙХ)
+# 🚀 ҮНДСЭН ГОГЦОО
 # ==========================================================
 def main():
     global last_telegram_report_time, cycle_start_time, cycle_realized_pnl, last_balance
 
     print("=" * 70)
-    print(f"  💼 ПОРТФОЛИЙН БОТ (6 цагийн цикл, 5 минутын мэдээлэл)")
+    print(f"  💼 ПОРТФОЛИЙН БОТ (6 стратеги, 6 койн, 16.67% тус бүр)")
     print("=" * 70)
     print(f"  Эхлэх цаг: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
 
-    send_telegram(f"🤖 *БОТ АСЛАА!* (6 цагийн цикл, 5 минутын мэдээлэл)", pin=False)
+    send_telegram(f"🤖 *БОТ АСЛАА!* (6 стратеги, 6 койн, 16.67% тус бүр)", pin=False)
 
     # ==========================================================
-    # ✅ БОТ АСМАГЦ ШУУД КОЙН ШИНЖИЛГЭЭ + АРИЛЖАА
+    # БОТ АСМАГЦ ШУУД КОЙН ШИНЖИЛГЭЭ + АРИЛЖАА
     # ==========================================================
     print("\n🚀 Анхны койн шинжилгээ хийж байна...")
     try:
-        selected_coins = screen_coins()
+        selected_coins = screen_coins_by_strategy()
         if selected_coins:
-            coin_list = "\n".join([f"   {i+1}. {c['symbol']} (Оноо: {c['score']}, Төлөв: {c['regime']})" for i, c in enumerate(selected_coins)])
+            coin_list = "\n".join([f"   {i+1}. {c['symbol']} | Стратеги: {c['strategy']} | Оноо: {c['score']:.1f}" for i, c in enumerate(selected_coins)])
             msg = f"📋 *ШИНЭ ЗООСОН КОЙНУУД (ЭХЛЭЛ)*\n━━━━━━━━━━━━━━━━━\n{coin_list}"
             send_telegram(msg, pin=True)
         else:
@@ -365,11 +425,9 @@ def main():
         print(f"❌ Анхны койн шинжилгээний алдаа: {e}")
         send_telegram(f"❌ *АНХНЫ АЛДАА*\n━━━━━━━━━━━━━━━━━\n{e}", pin=False)
 
-    # Цаг хуваарийг тохируулах
     last_selection_time = time.time()
     last_balance = get_usdt_balance()
     cycle_start_time = time.time()
-
     cycle_count = 0
 
     # ==========================================================
@@ -380,33 +438,28 @@ def main():
             current_time = time.time()
             elapsed = current_time - last_selection_time
 
-            # --- 6 цаг тутамд шинэ койн сонголт ---
             if elapsed >= SELECTION_INTERVAL_MINUTES * 60:
                 cycle_count += 1
                 print(f"\n🔄 {cycle_count}-р ЦИКЛ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}-д эхэллээ")
 
-                # 1. Циклийн хураангуй (Pin)
                 try:
                     send_cycle_summary()
                 except Exception as e:
                     print(f"❌ Циклийн хураангуй алдаа: {e}")
 
-                # 2. Койн шинжилгээ
                 try:
-                    selected_coins = screen_coins()
+                    selected_coins = screen_coins_by_strategy()
                 except Exception as e:
                     print(f"❌ Койн шинжилгээний алдаа: {e}")
                     selected_coins = []
 
-                # 3. Шинэ койн сонголт (Pin)
                 if selected_coins:
-                    coin_list = "\n".join([f"   {i+1}. {c['symbol']} (Оноо: {c['score']}, Төлөв: {c['regime']})" for i, c in enumerate(selected_coins)])
+                    coin_list = "\n".join([f"   {i+1}. {c['symbol']} | Стратеги: {c['strategy']} | Оноо: {c['score']:.1f}" for i, c in enumerate(selected_coins)])
                     msg = f"📋 *ШИНЭ ЗООСОН КОЙНУУД*\n━━━━━━━━━━━━━━━━━\n{coin_list}"
                     send_telegram(msg, pin=True)
                 else:
                     send_telegram("⚠️ *КОЙН СОНГОЛТ АМЖИЛТГҮЙ*\n━━━━━━━━━━━━━━━━━\nAPI-д холбогдоход асуудал гарсан байна.", pin=False)
 
-                # 4. Арилжаа нээх
                 try:
                     total_balance = get_usdt_balance()
                     execute_trades(selected_coins, total_balance)
@@ -418,7 +471,6 @@ def main():
                 last_balance = total_balance if 'total_balance' in locals() else get_usdt_balance()
                 print(f"✅ {cycle_count}-р цикл дууслаа. Дараагийн цикл {SELECTION_INTERVAL_MINUTES} минутын дараа.")
 
-            # --- Позиц хянах (5 минут тутам) ---
             try:
                 monitor_positions()
             except Exception as e:
