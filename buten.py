@@ -25,13 +25,15 @@ SYMBOLS_POOL = [
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "MATICUSDT", "LINKUSDT",
     "DOTUSDT", "UNIUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT"
 ]
-SELECTION_INTERVAL_MINUTES = 5
-MONITOR_INTERVAL_SEC = 60
-TELEGRAM_REPORT_INTERVAL_SEC = 600
-TRADE_ALLOCATION = 0.20
-STOP_LOSS_PCT = 2.0
-TAKE_PROFIT_PCT = 1.0
-MAX_SELECTIONS = 5
+
+SELECTION_INTERVAL_MINUTES = 360       # ✅ 6 ЦАГ (360 минут) - Шинэ coin сонголт
+MONITOR_INTERVAL_SEC = 60              # 1 минут тутам позиц шалгах
+TELEGRAM_REPORT_INTERVAL_SEC = 300     # ✅ 5 МИНУТ (300 секунд) - Позицын мэдээлэл
+
+TRADE_ALLOCATION = 0.20              
+STOP_LOSS_PCT = 2.0                 
+TAKE_PROFIT_PCT = 1.0               
+MAX_SELECTIONS = 5                  
 
 # ==========================================================
 # 🔐 ГАРЫН ҮСЭГ
@@ -190,7 +192,7 @@ def select_strategy(coin_data):
     else: return "HOLD"
 
 def screen_coins():
-    print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] Screening coins...")
+    print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] Койн шинжилж байна...")
     results = []
     for sym in SYMBOLS_POOL:
         data = analyze_coin(sym)
@@ -206,27 +208,22 @@ def screen_coins():
             selected_symbols.add(coin['symbol'])
             if len(selected) >= MAX_SELECTIONS: break
 
-    print("🏆 Top 5 coins selected:")
+    print("🏆 Шилдэг 5 койн:")
     for i, coin in enumerate(selected, 1):
-        print(f"   {i}. {coin['symbol']} | Score: {coin['score']} | Regime: {coin['regime']}")
+        print(f"   {i}. {coin['symbol']} | Оноо: {coin['score']} | Төлөв: {coin['regime']}")
 
     return selected
 
 # ==========================================================
-# 📱 TELEGRAM ХОЛБОО (PIN ХИЙХ БОЛОМЖТОЙ)
+# 📱 TELEGRAM ХОЛБОО (МОНГОЛ ХЭЛТЭЙ, PIN ХИЙХ БОЛОМЖТОЙ)
 # ==========================================================
 def send_telegram(text, pin=False):
-    """
-    Telegram-р мэдэгдэл илгээх.
-    pin=True бол илгээсэн мессежээ бэхлэнэ (pin).
-    """
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
         resp = requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
-            print("✅ Telegram message sent.")
-            # Хэрэв pin хийх шаардлагатай бол
+            print("✅ Telegram мэдэгдэл илгээгдлээ.")
             if pin:
                 result = resp.json()
                 if result.get('ok'):
@@ -235,22 +232,22 @@ def send_telegram(text, pin=False):
                     pin_payload = {"chat_id": CHAT_ID, "message_id": message_id}
                     pin_resp = requests.post(pin_url, json=pin_payload, timeout=10)
                     if pin_resp.status_code == 200:
-                        print("📌 Message pinned.")
+                        print("📌 Зурвас бэхлэгдлээ (pin).")
                     else:
-                        print(f"❌ Pin error: {pin_resp.status_code} - {pin_resp.text}")
+                        print(f"❌ Бэхлэхэд алдаа: {pin_resp.status_code} - {pin_resp.text}")
                 else:
-                    print(f"❌ Send error: {result}")
+                    print(f"❌ Илгээхэд алдаа: {result}")
         else:
-            print(f"❌ Telegram error: {resp.status_code} - {resp.text}")
+            print(f"❌ Telegram алдаа: {resp.status_code} - {resp.text}")
     except Exception as e:
-        print(f"❌ Telegram send exception: {e}")
+        print(f"❌ Telegram илгээхэд алдаа: {e}")
 
 # ==========================================================
 # 💼 ЗАХИАЛГА ГҮЙЦЭТГЭХ
 # ==========================================================
 def execute_trades(selected_coins, total_balance):
     if not selected_coins:
-        send_telegram("⚠️ *NO COINS SELECTED*\n━━━━━━━━━━━━━━━━━\n`screen_coins()` returned empty list.")
+        send_telegram("⚠️ *КОЙН СОНГОГДООГҮЙ*\n━━━━━━━━━━━━━━━━━\nКойн шинжилгээ амжилтгүй боллоо.")
         return
 
     any_trade_opened = False
@@ -260,24 +257,24 @@ def execute_trades(selected_coins, total_balance):
         strategy = select_strategy(coin_data)
 
         if strategy == "HOLD":
-            print(f"⏸️ {symbol}: HOLD")
+            print(f"⏸️ {symbol}: ХҮЛЭЭХ төлөв")
             continue
 
         if total_balance < 10:
-            send_telegram(f"⚠️ *BALANCE TOO LOW*\n━━━━━━━━━━━━━━━━━\nUSDT: `${total_balance:.2f}`")
+            send_telegram(f"⚠️ *ҮЛДЭГДЭЛ ХАНГАЛТГҮЙ*\n━━━━━━━━━━━━━━━━━\nUSDT: `${total_balance:.2f}`\nХамгийн багадаа $10 байх ёстой.")
             return
 
         allocation_usdt = total_balance * TRADE_ALLOCATION
         quantity = round(allocation_usdt / price, 3)
 
         if quantity < 0.001:
-            print(f"⚠️ {symbol}: Quantity too small ({quantity})")
+            print(f"⚠️ {symbol}: Хэмжээ хэтэрхий бага ({quantity})")
             continue
 
         any_trade_opened = True
         cancel_all_orders(symbol)
 
-        print(f"🚀 {symbol}: Opening {strategy} | Qty: {quantity}")
+        print(f"🚀 {symbol}: {strategy} стратегиар нээж байна | Хэмжээ: {quantity}")
         order = place_market_order(symbol, "BUY", quantity)
 
         entry_price = float(order['avgPrice']) if order.get('avgPrice') else price
@@ -287,21 +284,21 @@ def execute_trades(selected_coins, total_balance):
         place_stop_loss_order(symbol, "SELL", quantity, sl_price)
         place_take_profit_order(symbol, "SELL", quantity, tp_price)
 
-        msg = (f"🟢 *NEW TRADE OPENED*\n━━━━━━━━━━━━━━━━━\n"
-               f"📌 Coin: `{symbol}`\n📊 Strategy: `{strategy}`\n📈 Side: `BUY`\n"
-               f"💰 Entry: `${entry_price:,.2f}`\n🛑 SL: `${sl_price:,.2f}` (-{STOP_LOSS_PCT}%)\n"
-               f"🎯 TP: `${tp_price:,.2f}` (+{TAKE_PROFIT_PCT}%)\n"
-               f"📦 Qty: `{quantity}` {symbol.replace('USDT','')}\n"
-               f"💵 Alloc: `${allocation_usdt:,.2f}` ({TRADE_ALLOCATION*100}% of balance)\n"
-               f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        send_telegram(msg)  # энэ нь pin хийхгүй
+        msg = (f"🟢 *ШИНЭ АРИЛЖАА НЭЭГДЛЭЭ*\n━━━━━━━━━━━━━━━━━\n"
+               f"📌 Койн: `{symbol}`\n📊 Стратеги: `{strategy}`\n📈 Чиглэл: `ХУДАЛДАН АВАХ`\n"
+               f"💰 Нээсэн үнэ: `${entry_price:,.2f}`\n🛑 Алдагдал хязгаар (SL): `${sl_price:,.2f}` (-{STOP_LOSS_PCT}%)\n"
+               f"🎯 Ашиг түгжих (TP): `${tp_price:,.2f}` (+{TAKE_PROFIT_PCT}%)\n"
+               f"📦 Хэмжээ: `{quantity}` {symbol.replace('USDT','')}\n"
+               f"💵 Зарцуулсан: `${allocation_usdt:,.2f}` ({TRADE_ALLOCATION*100}% of balance)\n"
+               f"⏰ Цаг: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        send_telegram(msg)
         time.sleep(1)
 
     if not any_trade_opened:
-        send_telegram("⏳ *NO TRADE EXECUTED*\n━━━━━━━━━━━━━━━━━\nAll selected coins are `HOLD` or quantity too small.")
+        send_telegram("⏳ *АРИЛЖАА ХИЙГДЭЭГҮЙ*\n━━━━━━━━━━━━━━━━━\nСонгогдсон бүх койн `HOLD` төлөвтэй эсвэл хэмжээ хэтэрхий бага байна.")
 
 # ==========================================================
-# 📊 ПОЗИЦ ХЯНАХ (10 минут тутам)
+# 📊 ПОЗИЦ ХЯНАХ (5 МИНУТ ТУТАМ МЭДЭЭЛЭЛ)
 # ==========================================================
 last_telegram_report_time = 0
 
@@ -311,20 +308,22 @@ def monitor_positions():
     if not positions: return
 
     current_time = time.time()
+    # ✅ 5 минут (300 секунд) тутамд мэдээлэл илгээх
     if (current_time - last_telegram_report_time) > TELEGRAM_REPORT_INTERVAL_SEC:
-        msg = f"📊 *POSITION UPDATE ({datetime.now().strftime('%H:%M')})*\n━━━━━━━━━━━━━━━━━\n"
+        msg = f"📊 *ПОЗИЦЫН МЭДЭЭЛЭЛ ({datetime.now().strftime('%H:%M')})*\n━━━━━━━━━━━━━━━━━\n"
         total_pnl = 0.0
         for pos in positions:
             pnl = pos['unRealizedProfit']; total_pnl += pnl
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-            msg += (f"🔹 `{pos['symbol']}`\n   Entry: ${pos['entryPrice']:,.2f} | Mark: ${pos['markPrice']:,.2f}\n"
-                    f"   PnL: `{pnl_str}` | Size: {abs(pos['positionAmt'])} BTC\n\n")
-        msg += f"━━━━━━━━━━━━━━━━━\n💵 *Total PnL*: `+${total_pnl:.2f}`" if total_pnl >= 0 else f"`-${abs(total_pnl):.2f}`"
-        send_telegram(msg)  # pin хийхгүй
+            msg += (f"🔹 `{pos['symbol']}`\n"
+                    f"   Нээсэн үнэ: ${pos['entryPrice']:,.2f} | Одоогийн үнэ: ${pos['markPrice']:,.2f}\n"
+                    f"   Ашиг/Алдагдал: `{pnl_str}` | Хэмжээ: {abs(pos['positionAmt'])} BTC\n\n")
+        msg += f"━━━━━━━━━━━━━━━━━\n💵 *НИЙТ АШИГ/АЛДАГДАЛ*: `+${total_pnl:.2f}`" if total_pnl >= 0 else f"`-${abs(total_pnl):.2f}`"
+        send_telegram(msg)
         last_telegram_report_time = current_time
 
 # ==========================================================
-# 🔄 ЦИКЛИЙН ХУРААНГУЙ (PIN ХИЙХ)
+# 🔄 ЦИКЛИЙН ХУРААНГУЙ (6 ЦАГ ТУТАМ, PIN ХИЙХ)
 # ==========================================================
 cycle_start_time = time.time()
 cycle_realized_pnl = 0.0
@@ -336,11 +335,11 @@ def send_cycle_summary():
     realized_pnl = current_balance - last_balance
     cycle_realized_pnl += realized_pnl
 
-    msg = (f"📆 *CYCLE SUMMARY ({SELECTION_INTERVAL_MINUTES}min)*\n"
+    msg = (f"📆 *6 ЦАГИЙН ЦИКЛИЙН ХУРААНГУЙ*\n"
            f"━━━━━━━━━━━━━━━━━\n"
-           f"⏰ Period: {datetime.fromtimestamp(cycle_start_time).strftime('%H:%M:%S')} - {datetime.now().strftime('%H:%M:%S')}\n"
-           f"💰 Cycle Realized PnL: `+${cycle_realized_pnl:.2f}`" if cycle_realized_pnl >= 0 else f"`-${abs(cycle_realized_pnl):.2f}`")
-    send_telegram(msg, pin=True)   # <-- ЭНД PIN ХИЙНЭ
+           f"⏰ Хугацаа: {datetime.fromtimestamp(cycle_start_time).strftime('%H:%M:%S')} - {datetime.now().strftime('%H:%M:%S')}\n"
+           f"💰 Бодит ашиг/алдагдал: `+${cycle_realized_pnl:.2f}`" if cycle_realized_pnl >= 0 else f"`-${abs(cycle_realized_pnl):.2f}`")
+    send_telegram(msg, pin=True)   # Pin хийх
 
     cycle_start_time = time.time()
     cycle_realized_pnl = 0.0
@@ -353,13 +352,14 @@ def main():
     global last_telegram_report_time, cycle_start_time, cycle_realized_pnl, last_balance
 
     print("=" * 70)
-    print(f"  💼 PORTFOLIO BOT (PIN ON CYCLE SUMMARY & SELECTION)")
+    print(f"  💼 ПОРТФОЛИЙН БОТ (6 цагийн цикл, 5 минутын мэдээлэл)")
     print("=" * 70)
-    print(f"  Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  SELECTION_INTERVAL_MINUTES = {SELECTION_INTERVAL_MINUTES} min")
+    print(f"  Эхлэх цаг: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Шинэ койн сонголт: {SELECTION_INTERVAL_MINUTES} минут тутам")
+    print(f"  Позицын мэдээлэл: {TELEGRAM_REPORT_INTERVAL_SEC} секунд (5 минут) тутам")
     print("=" * 70)
 
-    send_telegram(f"🤖 *Bot Started! (PIN enabled for cycle summary & selection)*", pin=False)
+    send_telegram(f"🤖 *БОТ АСЛАА!* (6 цагийн цикл, 5 минутын мэдээлэл)", pin=False)
 
     last_selection_time = time.time()
     last_balance = get_usdt_balance()
@@ -371,57 +371,58 @@ def main():
             current_time = time.time()
             elapsed = current_time - last_selection_time
 
+            # --- 6 цаг тутамд шинэ койн сонголт ---
             if elapsed >= SELECTION_INTERVAL_MINUTES * 60:
                 cycle_count += 1
-                print(f"\n🔄 CYCLE #{cycle_count} triggered at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"\n🔄 {cycle_count}-р ЦИКЛ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}-д эхэллээ")
 
-                # 1. Cycle summary (PIN)
+                # 1. Циклийн хураангуй (Pin хийх)
                 try:
                     send_cycle_summary()
                 except Exception as e:
-                    print(f"❌ cycle summary error: {e}")
+                    print(f"❌ Циклийн хураангуй алдаа: {e}")
 
-                # 2. Coin сонголт
+                # 2. Койн шинжилгээ
                 try:
                     selected_coins = screen_coins()
                 except Exception as e:
-                    print(f"❌ screen_coins error: {e}")
+                    print(f"❌ Койн шинжилгээний алдаа: {e}")
                     selected_coins = []
 
-                # 3. NEW COIN SELECTION (PIN)
+                # 3. Шинэ койн сонголт (Pin хийх)
                 if selected_coins:
-                    coin_list = "\n".join([f"   {i+1}. {c['symbol']} (Score: {c['score']}, {c['regime']})" for i, c in enumerate(selected_coins)])
-                    msg = f"📋 *NEW COIN SELECTION*\n━━━━━━━━━━━━━━━━━\n{coin_list}"
-                    send_telegram(msg, pin=True)   # <-- ЭНД PIN ХИЙНЭ
+                    coin_list = "\n".join([f"   {i+1}. {c['symbol']} (Оноо: {c['score']}, Төлөв: {c['regime']})" for i, c in enumerate(selected_coins)])
+                    msg = f"📋 *ШИНЭ ЗООСОН КОЙНУУД*\n━━━━━━━━━━━━━━━━━\n{coin_list}"
+                    send_telegram(msg, pin=True)
                 else:
-                    send_telegram("⚠️ *NEW COIN SELECTION FAILED*\n━━━━━━━━━━━━━━━━━\nNo coins analyzed. Check API/network.", pin=False)
+                    send_telegram("⚠️ *КОЙН СОНГОЛТ АМЖИЛТГҮЙ*\n━━━━━━━━━━━━━━━━━\nAPI-д холбогдоход асуудал гарсан байна.", pin=False)
 
                 # 4. Арилжаа нээх
                 try:
                     total_balance = get_usdt_balance()
                     execute_trades(selected_coins, total_balance)
                 except Exception as e:
-                    print(f"❌ execute_trades error: {e}")
-                    send_telegram(f"❌ *TRADE EXECUTION ERROR*\n━━━━━━━━━━━━━━━━━\n{e}")
+                    print(f"❌ Арилжаа нээхэд алдаа: {e}")
+                    send_telegram(f"❌ *АРИЛЖААНЫ АЛДАА*\n━━━━━━━━━━━━━━━━━\n{e}")
 
                 last_selection_time = current_time
                 last_balance = total_balance if 'total_balance' in locals() else get_usdt_balance()
-                print(f"✅ Cycle #{cycle_count} completed.")
+                print(f"✅ {cycle_count}-р цикл дууслаа. Дараагийн цикл {SELECTION_INTERVAL_MINUTES} минутын дараа.")
 
-            # Позиц хянах
+            # --- Позиц хянах (5 минут тутам мэдэгдэл) ---
             try:
                 monitor_positions()
             except Exception as e:
-                print(f"❌ monitor_positions error: {e}")
+                print(f"❌ Позиц хянах алдаа: {e}")
 
             time.sleep(MONITOR_INTERVAL_SEC)
 
         except KeyboardInterrupt:
-            print("\n🛑 Bot stopped by user.")
-            send_telegram("🛑 *Bot Stopped*", pin=False)
+            print("\n🛑 Ботыг хэрэглэгч зогсоосон.")
+            send_telegram("🛑 *БОТ ЗОГСООСОН*", pin=False)
             break
         except Exception as main_error:
-            error_msg = f"❌ *MAIN LOOP ERROR*\n━━━━━━━━━━━━━━━━━\n{traceback.format_exc()}"
+            error_msg = f"❌ *ГОЛ АЛДАА*\n━━━━━━━━━━━━━━━━━\n{traceback.format_exc()}"
             print(error_msg)
             try:
                 send_telegram(error_msg[:4000], pin=False)
