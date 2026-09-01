@@ -1,16 +1,15 @@
 """
 settings.py
 Нууц зүйлийг .env-ээс, тохиргоог config.json-оос уншина.
-Хэрэглэх: from settings import *  эсвэл  import settings
 """
 
 import os
 import json
 from dotenv import load_dotenv
 
-load_dotenv()  # .env файлыг уншиж os.environ-д ачаална (хэрэв байвал)
+load_dotenv()
 
-# ---- Нууц (secrets) - ЗӨВХӨН ENV-С УНШИНА ----
+# ---- Нууц (secrets) ----
 API_KEY = os.environ.get("BINANCE_API_KEY")
 API_SECRET = os.environ.get("BINANCE_API_SECRET")
 BASE_URL = os.environ.get("BINANCE_BASE_URL", "https://demo-fapi.binance.com")
@@ -22,12 +21,10 @@ TELEGRAM_API_ROOT = os.environ.get("TELEGRAM_API_ROOT", "https://api.telegram.or
 # ---- Тохиргоо (config.json) ----
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
-# config.json байхгүй бол default утгуудыг ашиглах
 try:
     with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
         _cfg = json.load(f)
 except FileNotFoundError:
-    # Default config (жишээ)
     _cfg = {
         "symbols_pool": [
             "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -56,7 +53,13 @@ except FileNotFoundError:
         "adaptive_strategy": True,
         "strategy_performance_tracking": True,
         "consecutive_loss_limit": 3,
-        "strategy_cooldown_cycles": 2
+        "strategy_cooldown_cycles": 2,
+        "backtest_enabled": True,
+        "backtest_days": 30,
+        "backtest_interval": "1h",
+        "news_sentiment_enabled": True,
+        "cryptopanic_api_key": "YOUR_CRYPTOPANIC_API_KEY",
+        "news_lookback_hours": 24
     }
 
 SYMBOLS_POOL = _cfg["symbols_pool"]
@@ -90,6 +93,15 @@ ADAPTIVE_STRATEGY = _cfg["adaptive_strategy"]
 STRATEGY_PERFORMANCE_TRACKING = _cfg["strategy_performance_tracking"]
 CONSECUTIVE_LOSS_LIMIT = _cfg["consecutive_loss_limit"]
 STRATEGY_COOLDOWN_CYCLES = _cfg["strategy_cooldown_cycles"]
+
+# ---- Шинэ параметрүүд ----
+BACKTEST_ENABLED = _cfg.get("backtest_enabled", True)
+BACKTEST_DAYS = _cfg.get("backtest_days", 30)
+BACKTEST_INTERVAL = _cfg.get("backtest_interval", "1h")
+
+NEWS_SENTIMENT_ENABLED = _cfg.get("news_sentiment_enabled", True)
+CRYPTOPANIC_API_KEY = _cfg.get("cryptopanic_api_key", "")
+NEWS_LOOKBACK_HOURS = _cfg.get("news_lookback_hours", 24)
 
 
 def validate_config():
