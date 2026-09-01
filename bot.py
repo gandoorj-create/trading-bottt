@@ -182,7 +182,7 @@ def current_timestamp_ms():
 # 📱 TELEGRAM
 # ==========================================================
 
-def send_telegram(text, pin=False, parse_mode=None):   # parse_mode-г None болгов
+def send_telegram(text, pin=False, parse_mode=None):
     if not BOT_TOKEN or not CHAT_ID:
         return False
     try:
@@ -190,8 +190,10 @@ def send_telegram(text, pin=False, parse_mode=None):   # parse_mode-г None бо
         payload = {
             "chat_id": CHAT_ID,
             "text": text,
-            "parse_mode": parse_mode   # энд None дамжина
         }
+        # parse_mode-г зөвхөн утгатай үед л нэмэх
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code != 200:
             print("❌ Telegram error:", response.text)
@@ -479,7 +481,11 @@ def cancel_all_orders(symbol):
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def cancel_all_algo_orders(symbol):
-    return send_signed_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+    # Note: Binance futures-д algo orders-г цуцлах эндпоинт /fapi/v1/algoOpenOrders биш, /fapi/v1/algoOrder байх ёстой.
+    # Бид одоогийн кодонд энэ функцийг зөвхөн цуцлахад хэрэглэж байгаа тул DELETE хэрэглэх нь зөв.
+    # Гэхдээ sync_existing_positions-д GET-ээр авах гэж оролдсон алдаа гарч байгаа.
+    # Энэ функцийг зөвхөн DELETE-д хэрэглэх болгон өөрчлөх.
+    return send_signed_request("DELETE", "/fapi/v1/algoOrder", {"symbol": symbol})
 
 def cancel_all_symbol_orders(symbol):
     normal = cancel_all_orders(symbol)
@@ -1017,14 +1023,20 @@ def sync_existing_positions():
         qty = abs(amount)
         entry = pos["entryPrice"]
 
-        # Algo orders-ийг шалгах
-        algo_orders = send_signed_request("GET", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+        # Algo orders-ийг шалгах - энэ хэсэгт GET /fapi/v1/algoOpenOrders байхгүй тул түр орхиж, шалгалтыг хялбарчлах
+        # Хэрэв algo orders байгаа эсэхийг мэдэх шаардлагатай бол өөр арга хэрэглэх хэрэгтэй.
+        # Одоохондоо has_protection = False гэж үзээд дахин байгуулах.
         has_protection = False
-        if isinstance(algo_orders, list):
-            for order in algo_orders:
-                if order.get("symbol") == symbol and order.get("type") in ("TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
-                    has_protection = True
-                    break
+        # TODO: Binance futures-д algo orders-г шалгах зөв эндпоинт хэрэгтэй. Одоогоор 404 гарч байгаа тул энэ хэсгийг түр идэвхгүй болгоё.
+        # try:
+        #     algo_orders = send_signed_request("GET", "/fapi/v1/algoOrders", {"symbol": symbol})
+        #     if isinstance(algo_orders, list):
+        #         for order in algo_orders:
+        #             if order.get("symbol") == symbol and order.get("type") in ("TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
+        #                 has_protection = True
+        #                 break
+        # except Exception:
+        #     pass
 
         active_trade_info[symbol] = {
             "strategy": "RECOVERED",
@@ -1963,9 +1975,8 @@ def main():
                     continue
                 for symbol in test_symbols:
                     report = run_backtest(symbol, strategy, days=BACKTEST_DAYS, interval=BACKTEST_INTERVAL)
-                    # Шүүлтийг сулруулсан: "хангалттай" гэх үг агуулаагүй л бол бүх тайланг илгээнэ
                     if report and "хангалттай" not in report:
-                        send_telegram(report)   # parse_mode default None учраас алдаа гарахгүй
+                        send_telegram(report)
                     time.sleep(1)
         except Exception as e:
             print(f"❌ Backtest error: {e}")
