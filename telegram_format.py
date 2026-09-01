@@ -1,11 +1,12 @@
 """
 telegram_format.py
 Telegram мэдэгдлүүдийг цэвэр, албан ёсны хэлбэрт оруулах.
-Бүх emoji-г хасаж, Монгол + Англи хосолсон тайлбартай.
-Гарчигны доорх зураас (━) хасагдсан.
+Зөөлөн харагдац, налуу биш (italic ашиглахгүй).
+Label-уудыг тод (bold) болгож, утгуудыг энгийн үлдээсэн.
 """
 
 import re
+
 
 # ---------- Орчуулгын толь ----------
 _TRANSLATIONS = {
@@ -54,12 +55,13 @@ _TRANSLATIONS = {
 
 
 def money(value, decimals=2):
+    """Мөнгөний дүнг форматлах"""
     sign = "+" if value >= 0 else ""
     return f"{sign}${value:,.{decimals}f}"
 
 
 def _clean_text(text):
-    # Emoji-г арилгах
+    """Текстээс emoji-г арилгах"""
     emoji_pattern = re.compile("["
         u"\U0001F600-\U0001F64F"
         u"\U0001F300-\U0001F5FF"
@@ -81,12 +83,17 @@ def _clean_text(text):
 
 
 def _translate_label(label):
+    """Label-г орчуулах"""
     if "/" in label:
         return label
     return _TRANSLATIONS.get(label, label)
 
 
 def _format_rows(rows, indent=2):
+    """
+    rows: (label, value) хосын жагсаалт.
+    Label-уудыг тод (bold) болгон, утгуудыг энгийн хэвээр үлдээнэ.
+    """
     if not rows:
         return ""
 
@@ -103,7 +110,8 @@ def _format_rows(rows, indent=2):
     max_label_len = max(len(label) for label, _ in valid_rows)
     lines = []
     for label, value in valid_rows:
-        lines.append(f"{' ' * indent}{label.ljust(max_label_len)} : {value}")
+        # Label-ыг тод (bold) болгох, утгыг энгийн үлдээх
+        lines.append(f"{' ' * indent}*{label.ljust(max_label_len)}* : {value}")
     return "\n".join(lines)
 
 
@@ -112,7 +120,7 @@ def format_block(title, emoji, rows):
     Нэг блок форматлах (зураасгүй)
     """
     clean_title = _clean_text(title)
-    # Гарчиг (зураасгүй)
+    # Гарчиг тод (bold)
     header = f"*{clean_title}*"
     body = _format_rows(rows)
     if body:
@@ -135,7 +143,8 @@ def format_section(title, emoji, sections):
         clean_sub = _clean_text(sub_title) if sub_title else ""
         block = ""
         if clean_sub:
-            block = f"{clean_sub}"
+            # Дэд гарчиг тод (bold)
+            block = f"*{clean_sub}*"
         body = _format_rows(rows)
         if body:
             if block:
