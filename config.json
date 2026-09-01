@@ -33,5 +33,13 @@
   "adaptive_strategy": true,
   "strategy_performance_tracking": true,
   "consecutive_loss_limit": 3,
-  "strategy_cooldown_cycles": 2
+  "strategy_cooldown_cycles": 2,
+
+  "backtest_enabled": true,
+  "backtest_days": 30,
+  "backtest_interval": "1h",
+
+  "news_sentiment_enabled": true,
+  "cryptopanic_api_key": "YOUR_CRYPTOPANIC_API_KEY",
+  "news_lookback_hours": 24
 }
