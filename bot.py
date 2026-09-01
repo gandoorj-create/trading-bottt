@@ -216,7 +216,7 @@ def send_telegram(text, pin=False):
         payload = {
             "chat_id": CHAT_ID,
             "text": text,
-            "parse_mode": "HTML"  # <-- ЗАССАН: Markdown биш HTML
+            "parse_mode": "Markdown"
         }
 
         response = requests.post(
