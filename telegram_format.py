@@ -1,175 +1,147 @@
 """
 telegram_format.py
 Telegram мэдэгдлүүдийг цэвэр, албан ёсны хэлбэрт оруулах.
-Монгол + Англи хэлний тайлбартай, backtick ашиглахгүй.
+Бүх emoji-г хасаж, Монгол + Англи хосолсон тайлбартай.
+Гарчигны доорх зураас (━) хасагдсан.
 """
 
-from datetime import datetime
+import re
+
+# ---------- Орчуулгын толь ----------
+_TRANSLATIONS = {
+    "Symbol": "Бэлгэ тэмдэг / Symbol",
+    "Strategy": "Стратеги / Strategy",
+    "Signal": "Дохио / Signal",
+    "Side": "Чиглэл / Side",
+    "Entry": "Нээсэн үнэ / Entry",
+    "Mark": "Одоогийн үнэ / Mark",
+    "PnL": "Ашиг/Алдагдал / PnL",
+    "Qty": "Хэмжээ / Qty",
+    "Price": "Үнэ / Price",
+    "Error": "Алдаа / Error",
+    "Status": "Төлөв / Status",
+    "Details": "Дэлгэрэнгүй / Details",
+    "Note": "Анхаар / Note",
+    "Target": "Зорилт / Target",
+    "Balance": "Үлдэгдэл / Balance",
+    "New Balance": "Шинэ үлдэгдэл / New Balance",
+    "Margin": "Дансны хувь / Margin",
+    "Leverage": "Хөшүүрэг / Leverage",
+    "Allocation": "Хуваарилалт / Allocation",
+    "Time": "Цаг / Time",
+    "Period": "Хугацаа / Period",
+    "Open Positions": "Нээлттэй позиц / Open Positions",
+    "Active strategies": "Идэвхтэй стратеги / Active strategies",
+    "Score": "Оноо / Score",
+    "ADX": "ADX",
+    "RSI": "RSI",
+    "Regime": "Зах зээлийн төлөв / Regime",
+    "ADX / RSI": "ADX / RSI",
+    "Take Profit": "Ашиг түгжих / Take Profit",
+    "Stop Loss": "Алдагдал хязгаар / Stop Loss",
+    "Trailing": "Аялгын зогсоолт / Trailing",
+    "Activation": "Идэвхжүүлэх үнэ / Activation",
+    "Callback": "Буцах хувь / Callback",
+    "Trades": "Арилжааны тоо / Trades",
+    "Win / Loss": "Хожсон / Алдсан",
+    "Win rate": "Хожлын хувь / Win rate",
+    "Loss streak": "Дараалсан алдагдал / Loss streak",
+    "Unrealized": "Нийт реализаагүй / Unrealized",
+    "Session Realized": "Сессийн ашиг / Session PnL",
+    "Realized PnL": "Бодит ашиг / Realized PnL",
+    "Balance change": "Үлдэгдлийн өөрчлөлт / Balance change",
+}
 
 
 def money(value, decimals=2):
-    """Мөнгөний дүнг форматлах (жишээ: +$123.45)"""
     sign = "+" if value >= 0 else ""
     return f"{sign}${value:,.{decimals}f}"
 
 
-def fmt_price(value, decimals=4):
-    return f"${value:,.{decimals}f}"
+def _clean_text(text):
+    # Emoji-г арилгах
+    emoji_pattern = re.compile("["
+        u"\U0001F600-\U0001F64F"
+        u"\U0001F300-\U0001F5FF"
+        u"\U0001F680-\U0001F6FF"
+        u"\U0001F1E0-\U0001F1FF"
+        u"\U00002702-\U000027B0"
+        u"\U000024C2-\U0001F251"
+        u"\U0001F900-\U0001F9FF"
+        u"\U0001FA70-\U0001FAFF"
+        u"\U00002600-\U000026FF"
+        u"\U00002B50-\U00002B55"
+        u"\U000025AA-\U000025FE"
+        u"\U00002020-\U000020BF"
+        u"\U000023E9-\U000023FA"
+        u"\U000025B6-\U000025C0"
+        u"\U00002192-\U00002199"
+        "]+", flags=re.UNICODE)
+    return emoji_pattern.sub(r'', text).strip()
 
 
-def fmt_qty(value):
-    if value >= 1:
-        return f"{value:,.2f}"
-    else:
-        return f"{value:,.6f}"
+def _translate_label(label):
+    if "/" in label:
+        return label
+    return _TRANSLATIONS.get(label, label)
 
 
-def _build_block(title, emoji, rows):
-    """
-    rows: (label_mon, label_en, value) хэлбэрийн жагсаалт
-    """
-    line = "━" * 30
-    header = f"{emoji} *{title}*\n{line}"
-
+def _format_rows(rows, indent=2):
     if not rows:
+        return ""
+
+    valid_rows = []
+    for label, value in rows:
+        if value is None:
+            continue
+        translated_label = _translate_label(label)
+        valid_rows.append((translated_label, value))
+
+    if not valid_rows:
+        return ""
+
+    max_label_len = max(len(label) for label, _ in valid_rows)
+    lines = []
+    for label, value in valid_rows:
+        lines.append(f"{' ' * indent}{label.ljust(max_label_len)} : {value}")
+    return "\n".join(lines)
+
+
+def format_block(title, emoji, rows):
+    """
+    Нэг блок форматлах (зураасгүй)
+    """
+    clean_title = _clean_text(title)
+    # Гарчиг (зураасгүй)
+    header = f"*{clean_title}*"
+    body = _format_rows(rows)
+    if body:
+        return f"{header}\n{body}"
+    else:
         return header
 
-    # Label-ийн хамгийн уртыг тооцоолох (монгол + англи нийлсэн)
-    max_len = max(len(f"{mon} / {eng}") for mon, eng, val in rows if val is not None)
-    lines = []
-    for mon, eng, val in rows:
-        if val is None:
+
+def format_section(title, emoji, sections):
+    """
+    Олон блоктой мессеж (зураасгүй)
+    """
+    clean_title = _clean_text(title)
+    header = f"*{clean_title}*"
+
+    parts = []
+    for sub_title, rows in sections:
+        if not rows:
             continue
-        label = f"{mon} / {eng}"
-        padded = label.ljust(max_len)
-        lines.append(f"  {padded} : {val}")
+        clean_sub = _clean_text(sub_title) if sub_title else ""
+        block = ""
+        if clean_sub:
+            block = f"{clean_sub}"
+        body = _format_rows(rows)
+        if body:
+            if block:
+                parts.append(f"{block}\n{body}")
+            else:
+                parts.append(body)
 
-    body = "\n".join(lines)
-    return f"{header}\n{body}"
-
-
-# ---------- Гол функцууд ----------
-
-def format_start_message(balance, target, leverage, allocation):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rows = [
-        ("Цаг", "Time", now),
-        ("Дансны үлдэгдэл", "Balance", money(balance)),
-        ("Зорилт", "Target", money(target)),
-        ("Хөшүүрэг", "Leverage", f"{leverage}x"),
-        ("Хуваарилалт", "Allocation", f"{allocation * 100:.0f}%"),
-    ]
-    return _build_block("БОТ АСЛАА / BOT STARTED", "🚀", rows)
-
-
-def format_recovered_positions(positions):
-    """ХУУЧИН ПОЗИЦ ОЛДЛОО (Restart)"""
-    if not positions:
-        return None
-
-    parts = []
-    for pos in positions:
-        symbol = pos.get("symbol")
-        side = pos.get("side", "BUY")
-        strategy = pos.get("strategy", "RECOVERED")
-        entry = pos.get("entry_price", 0)
-        mark = pos.get("mark_price", 0)
-        pnl = pos.get("pnl", 0)
-        qty = pos.get("quantity", 0)
-
-        rows = [
-            ("Стратеги", "Strategy", strategy),
-            ("Чиглэл", "Side", side),
-            ("Нээсэн үнэ", "Entry", fmt_price(entry)),
-            ("Одоогийн үнэ", "Mark", fmt_price(mark)),
-            ("Ашиг/Алдагдал", "PnL", money(pnl)),
-            ("Хэмжээ", "Qty", fmt_qty(qty)),
-        ]
-        parts.append(_build_block(symbol, "📌", rows))
-
-    header = "🔄 *ХУУЧИН ПОЗИЦ ОЛДЛОО / RECOVERED POSITIONS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    return header + "\n\n".join(parts)
-
-
-def format_monitor_report(positions, total_unrealized, balance, session_pnl, target):
-    if not positions:
-        return "📊 *ПОЗИЦ БАЙХГҮЙ / NO POSITIONS*"
-
-    parts = []
-    for pos in positions:
-        symbol = pos.get("symbol")
-        side = pos.get("side", "UNKNOWN")
-        strategy = pos.get("strategy", "UNKNOWN")
-        entry = pos.get("entry_price", 0)
-        mark = pos.get("mark_price", 0)
-        pnl = pos.get("pnl", 0)
-        qty = pos.get("quantity", 0)
-
-        rows = [
-            ("Стратеги", "Strategy", strategy),
-            ("Чиглэл", "Side", side),
-            ("Нээсэн үнэ", "Entry", fmt_price(entry)),
-            ("Одоогийн үнэ", "Mark", fmt_price(mark)),
-            ("Ашиг/Алдагдал", "PnL", money(pnl)),
-            ("Хэмжээ", "Qty", fmt_qty(qty)),
-        ]
-        parts.append(_build_block(symbol, "🔹", rows))
-
-    header = "📊 *ПОЗИЦЫН ТАЙЛАН / POSITION REPORT*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     body = "\n\n".join(parts)
-
-    remaining = target - session_pnl
-    summary = (
-        f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 *Нийт реализаагүй / Unrealized* : {money(total_unrealized)}\n"
-        f"💵 *Сессийн ашиг / Session PnL*     : {money(session_pnl)}\n"
-        f"🎯 *Үлдсэн зорилт / Remaining*      : {money(remaining)}"
-    )
-
-    return header + "\n\n".join(parts) + summary
-
-
-def format_new_trade(symbol, strategy, side, entry, sl, tp, margin, leverage, score, adx, rsi, regime):
-    rows = [
-        ("Стратеги", "Strategy", strategy),
-        ("Чиглэл", "Side", side),
-        ("Нээсэн үнэ", "Entry", fmt_price(entry)),
-        ("Stop Loss", "Stop Loss", fmt_price(sl)),
-        ("Take Profit", "Take Profit", fmt_price(tp)),
-        ("Дансны хувь", "Margin", f"{margin:.2f} USDT"),
-        ("Хөшүүрэг", "Leverage", f"{leverage}x"),
-        ("Оноо", "Score", f"{score:.2f}"),
-        ("ADX", "ADX", f"{adx:.1f}"),
-        ("RSI", "RSI", f"{rsi:.1f}"),
-        ("Зах зээлийн төлөв", "Regime", regime),
-    ]
-    return _build_block(f"{symbol} - ШИНЭ ПОЗИЦ / NEW POSITION", "🚀", rows)
-
-
-def format_position_closed(symbol, strategy, pnl):
-    emoji = "🟢" if pnl >= 0 else "🔴"
-    rows = [
-        ("Стратеги", "Strategy", strategy),
-        ("Ашиг/Алдагдал", "PnL", money(pnl)),
-    ]
-    return _build_block(f"{symbol} - ПОЗИЦ ХААГДЛАА / POSITION CLOSED", emoji, rows)
-
-
-def format_selection_report(selected):
-    if not selected:
-        return "⚠️ *SIGNAL ОЛДСОНГҮЙ / NO SIGNAL*"
-
-    parts = []
-    for i, coin in enumerate(selected, 1):
-        rows = [
-            ("Стратеги", "Strategy", coin.get("strategy")),
-            ("Дохио", "Signal", coin.get("signal")),
-            ("Оноо", "Score", f"{coin.get('score', 0):.2f}"),
-            ("ADX", "ADX", f"{coin.get('adx', 0):.1f}"),
-            ("RSI", "RSI", f"{coin.get('rsi', 0):.1f}"),
-            ("Төлөв", "Regime", coin.get("regime")),
-        ]
-        parts.append(_build_block(f"{i}. {coin.get('symbol')}", "🏆", rows))
-
-    header = "🏆 *ШИНЭ TOP SIGNALS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    return header + "\n\n".join(parts)
+    return f"{header}\n{body}"
