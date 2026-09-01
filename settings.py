@@ -35,8 +35,8 @@ except FileNotFoundError:
         "selection_interval_minutes": 360,
         "monitor_interval_sec": 30,
         "telegram_report_interval_sec": 300,
-        "max_selections": 6,
-        "trade_allocation": 0.15,
+        "max_selections": 4,
+        "trade_allocation": 0.12,
         "leverage": 5,
         "trailing_callback_rate": 0.5,
         "trailing_activation_pct": 1.0,
@@ -46,25 +46,25 @@ except FileNotFoundError:
         "target_cooldown_sec": 600,
         "close_verify_attempts": 12,
         "close_verify_delay_sec": 2,
-        "min_signal_score": 10.0,
+        "min_signal_score": 15.0,
         "min_balance_usdt": 10.0,
-        "max_total_margin_usage": 0.90,
+        "max_total_margin_usage": 0.70,
         "request_timeout": 15,
         "pnl_lookback_limit": 100,
         "adaptive_strategy": True,
         "strategy_performance_tracking": True,
         "consecutive_loss_limit": 3,
         "strategy_cooldown_cycles": 2,
-        "backtest_enabled": True,
+        "backtest_enabled": False,
         "backtest_days": 30,
         "backtest_interval": "1h",
-        "dca_enabled": True,
+        "dca_enabled": False,
         "dca_levels": 1,
         "dca_trigger_pct": 3.0,
         "dca_multiplier": 1.0,
         "dca_sl_pct": 2.0,
         "correlation_enabled": True,
-        "correlation_threshold": 0.7,
+        "correlation_threshold": 0.6,
         "correlation_lookback": 50
     }
 
@@ -104,12 +104,12 @@ CONSECUTIVE_LOSS_LIMIT = _cfg["consecutive_loss_limit"]
 STRATEGY_COOLDOWN_CYCLES = _cfg["strategy_cooldown_cycles"]
 
 # ---- Backtesting ----
-BACKTEST_ENABLED = _cfg.get("backtest_enabled", True)
+BACKTEST_ENABLED = _cfg.get("backtest_enabled", False)
 BACKTEST_DAYS = _cfg.get("backtest_days", 30)
 BACKTEST_INTERVAL = _cfg.get("backtest_interval", "1h")
 
 # ---- DCA (Dollar Cost Averaging) ----
-DCA_ENABLED = _cfg.get("dca_enabled", True)
+DCA_ENABLED = _cfg.get("dca_enabled", False)
 DCA_LEVELS = _cfg.get("dca_levels", 1)
 DCA_TRIGGER_PCT = _cfg.get("dca_trigger_pct", 3.0)
 DCA_MULTIPLIER = _cfg.get("dca_multiplier", 1.0)
@@ -117,7 +117,7 @@ DCA_SL_PCT = _cfg.get("dca_sl_pct", 2.0)
 
 # ---- Correlation (Портфолиогийн эрсдэлийн үнэлгээ) ----
 CORRELATION_ENABLED = _cfg.get("correlation_enabled", True)
-CORRELATION_THRESHOLD = _cfg.get("correlation_threshold", 0.7)
+CORRELATION_THRESHOLD = _cfg.get("correlation_threshold", 0.6)
 CORRELATION_LOOKBACK = _cfg.get("correlation_lookback", 50)
 
 
