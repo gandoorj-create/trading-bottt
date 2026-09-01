@@ -41,10 +41,12 @@ MAX_SELECTIONS = 6
 TRADE_ALLOCATION = 0.15
 LEVERAGE = 5
 
-STOP_LOSS_PCT = 2.0
+# TRAILING STOP
+TRAILING_CALLBACK_RATE = 0.5
+TRAILING_ACTIVATION_PCT = 1.0
+
 TAKE_PROFIT_PCT = 3.0
 MIN_SIGNAL_SCORE = 10.0
-
 MIN_BALANCE_USDT = 10
 MAX_TOTAL_MARGIN_USAGE = 0.90
 
@@ -57,7 +59,7 @@ STRATEGY_COOLDOWN_CYCLES = 2
 PNL_LOOKBACK_LIMIT = 100
 REQUEST_TIMEOUT = 15
 
-# 🎯 ЗОРИЛТЫН АШИГ
+# 🎯 ЗОРИЛТЫН АШИГ (Энэ удаад UNREALIZED-г хянана)
 TARGET_PROFIT = 300.0
 
 
@@ -347,6 +349,40 @@ def get_positions():
 
 
 # ==========================================================
+# 🛑 CLOSE ALL POSITIONS (UNREALIZED -> REALIZED)
+# ==========================================================
+
+def close_all_positions():
+    """Бүх нээлттэй позицуудыг хааж, unrealized ашгийг realized болгох"""
+    positions = get_positions()
+    if not positions:
+        return 0
+    
+    closed_count = 0
+    for pos in positions:
+        symbol = pos["symbol"]
+        amount = pos["positionAmt"]  # > 0 (LONG), < 0 (SHORT)
+        
+        if amount > 0:  # LONG → SELL
+            side = "SELL"
+        else:           # SHORT → BUY
+            side = "BUY"
+        
+        qty = abs(amount)
+        print(f"🔒 Closing {symbol} ({qty} @ {side})")
+        
+        result = place_market_order(symbol, side, qty, reduce_only=True)
+        if not is_api_error(result):
+            closed_count += 1
+            print(f"   ✅ {symbol} closed")
+        else:
+            print(f"   ❌ {symbol} close failed: {result}")
+        time.sleep(0.5)  # Rate limit хамгаалалт
+    
+    return closed_count
+
+
+# ==========================================================
 # ⚙️ LEVERAGE
 # ==========================================================
 
@@ -365,7 +401,7 @@ def ensure_leverage(symbol, leverage=LEVERAGE):
 
 
 # ==========================================================
-# 🛒 ORDERS
+# 🛒 ORDERS (MARKET, TP, TRAILING STOP)
 # ==========================================================
 
 def place_market_order(symbol, side, quantity, reduce_only=False):
@@ -404,6 +440,20 @@ def place_take_profit_order(symbol, side, quantity, tp_price):
     })
 
 
+def place_trailing_stop_order(symbol, side, quantity, callback_rate, stop_price=None):
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "TRAILING_STOP_MARKET",
+        "quantity": quantity,
+        "callbackRate": callback_rate,
+        "reduceOnly": "true"
+    }
+    if stop_price:
+        params["stopPrice"] = stop_price
+    return send_signed_request("POST", "/fapi/v1/order", params)
+
+
 def cancel_all_orders(symbol):
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {
         "symbol": symbol
@@ -411,7 +461,7 @@ def cancel_all_orders(symbol):
 
 
 # ==========================================================
-# 📈 MARKET DATA
+# 📈 MARKET DATA & INDICATORS (Товчхон)
 # ==========================================================
 
 def get_klines(symbol, interval="1h", limit=200):
@@ -441,10 +491,6 @@ def get_klines(symbol, interval="1h", limit=200):
         df[col] = df[col].astype(float)
     return df
 
-
-# ==========================================================
-# 📊 INDICATORS
-# ==========================================================
 
 def calculate_ema(df, period):
     return df["close"].ewm(span=period, adjust=False).mean()
@@ -533,7 +579,7 @@ def determine_regime(adx, ema_slope, atr_pct):
 
 
 # ==========================================================
-# 🎯 STRATEGY SIGNAL
+# 🎯 STRATEGY SIGNAL & SCORE (Товчхон)
 # ==========================================================
 
 def generate_strategy_signal(strategy, df, sentiment, regime):
@@ -549,130 +595,54 @@ def generate_strategy_signal(strategy, df, sentiment, regime):
     ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
 
     if strategy == "EMA_CROSSOVER":
-        bullish = (
-            ema20.iloc[-1] > ema50.iloc[-1]
-            and ema20.iloc[-2] <= ema50.iloc[-2]
-        )
-        bearish = (
-            ema20.iloc[-1] < ema50.iloc[-1]
-            and ema20.iloc[-2] >= ema50.iloc[-2]
-        )
-        if bullish and sentiment >= -0.4:
-            return "BUY"
-        if bearish and sentiment <= 0.4:
-            return "SELL"
+        bullish = (ema20.iloc[-1] > ema50.iloc[-1] and ema20.iloc[-2] <= ema50.iloc[-2])
+        bearish = (ema20.iloc[-1] < ema50.iloc[-1] and ema20.iloc[-2] >= ema50.iloc[-2])
+        if bullish and sentiment >= -0.4: return "BUY"
+        if bearish and sentiment <= 0.4: return "SELL"
 
     elif strategy == "MACD_MOMENTUM":
-        if (
-            histogram.iloc[-1] > 0
-            and histogram.iloc[-1] > histogram.iloc[-2]
-            and rsi < 70
-        ):
-            return "BUY"
-        if (
-            histogram.iloc[-1] < 0
-            and histogram.iloc[-1] < histogram.iloc[-2]
-            and rsi > 30
-        ):
-            return "SELL"
+        if histogram.iloc[-1] > 0 and histogram.iloc[-1] > histogram.iloc[-2] and rsi < 70: return "BUY"
+        if histogram.iloc[-1] < 0 and histogram.iloc[-1] < histogram.iloc[-2] and rsi > 30: return "SELL"
 
     elif strategy == "GRID_TRADING":
-        if regime in ["RANGE", "VOLATILE_RANGE"] and close <= lower.iloc[-1] and rsi < 40:
-            return "BUY"
-        if regime in ["RANGE", "VOLATILE_RANGE"] and close >= upper.iloc[-1] and rsi > 60:
-            return "SELL"
+        if regime in ["RANGE", "VOLATILE_RANGE"] and close <= lower.iloc[-1] and rsi < 40: return "BUY"
+        if regime in ["RANGE", "VOLATILE_RANGE"] and close >= upper.iloc[-1] and rsi > 60: return "SELL"
 
     elif strategy == "BOLLINGER_MEAN_REVERSION":
-        if regime in ["RANGE", "VOLATILE_RANGE"] and close < lower.iloc[-1] and rsi < 35:
-            return "BUY"
-        if regime in ["RANGE", "VOLATILE_RANGE"] and close > upper.iloc[-1] and rsi > 65:
-            return "SELL"
+        if regime in ["RANGE", "VOLATILE_RANGE"] and close < lower.iloc[-1] and rsi < 35: return "BUY"
+        if regime in ["RANGE", "VOLATILE_RANGE"] and close > upper.iloc[-1] and rsi > 65: return "SELL"
 
     elif strategy == "RSI_STRATEGY":
-        if rsi < 30 and sentiment > -0.6:
-            return "BUY"
-        if rsi > 70 and sentiment < 0.6:
-            return "SELL"
+        if rsi < 30 and sentiment > -0.6: return "BUY"
+        if rsi > 70 and sentiment < 0.6: return "SELL"
 
     elif strategy == "TREND_FOLLOWING":
-        if (
-            adx > 30
-            and ema20.iloc[-1] > ema50.iloc[-1] > ema200.iloc[-1]
-            and ema_slope > 0.5
-            and sentiment >= -0.3
-        ):
-            return "BUY"
-        if (
-            adx > 30
-            and ema20.iloc[-1] < ema50.iloc[-1] < ema200.iloc[-1]
-            and ema_slope < -0.5
-            and sentiment <= 0.3
-        ):
-            return "SELL"
+        if adx > 30 and ema20.iloc[-1] > ema50.iloc[-1] > ema200.iloc[-1] and ema_slope > 0.5 and sentiment >= -0.3: return "BUY"
+        if adx > 30 and ema20.iloc[-1] < ema50.iloc[-1] < ema200.iloc[-1] and ema_slope < -0.5 and sentiment <= 0.3: return "SELL"
     return "HOLD"
 
 
-# ==========================================================
-# 🧮 STRATEGY SCORE
-# ==========================================================
-
-def calculate_strategy_score(
-    strategy,
-    adx,
-    rsi,
-    atr_pct,
-    volume_ratio,
-    ema_slope,
-    sentiment,
-    regime
-):
+def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slope, sentiment, regime):
     score = 0.0
-
     if strategy == "EMA_CROSSOVER":
-        if regime in ["TRENDING", "STRONG_TREND"]:
-            score += 7
-        score += min(adx, 40) * 0.35
-        score += abs(ema_slope) * 2
-        score += min(volume_ratio, 3) * 1.5
-        score += sentiment * 2
-
+        if regime in ["TRENDING", "STRONG_TREND"]: score += 7
+        score += min(adx, 40) * 0.35 + abs(ema_slope) * 2 + min(volume_ratio, 3) * 1.5 + sentiment * 2
     elif strategy == "MACD_MOMENTUM":
-        if regime in ["TRENDING", "TRANSITION"]:
-            score += 5
-        score += max(0, 35 - abs(rsi - 50)) * 0.15
-        score += min(adx, 35) * 0.25
-        score += min(atr_pct, 5) * 2
-        score += min(volume_ratio, 3)
-
+        if regime in ["TRENDING", "TRANSITION"]: score += 5
+        score += max(0, 35 - abs(rsi - 50)) * 0.15 + min(adx, 35) * 0.25 + min(atr_pct, 5) * 2 + min(volume_ratio, 3)
     elif strategy == "GRID_TRADING":
-        if regime in ["RANGE", "VOLATILE_RANGE"]:
-            score += 8
-        score += max(0, 20 - adx) * 0.4
-        score += atr_pct * 3
-
+        if regime in ["RANGE", "VOLATILE_RANGE"]: score += 8
+        score += max(0, 20 - adx) * 0.4 + atr_pct * 3
     elif strategy == "BOLLINGER_MEAN_REVERSION":
-        if regime in ["RANGE", "VOLATILE_RANGE"]:
-            score += 7
-        score += max(0, 20 - adx) * 0.35
-        score += abs(rsi - 50) * 0.15
-        score += atr_pct * 2
-
+        if regime in ["RANGE", "VOLATILE_RANGE"]: score += 7
+        score += max(0, 20 - adx) * 0.35 + abs(rsi - 50) * 0.15 + atr_pct * 2
     elif strategy == "RSI_STRATEGY":
-        if rsi <= 35 or rsi >= 65:
-            score += 8
-        score += abs(rsi - 50) * 0.4
-        score += min(atr_pct, 5)
-
+        if rsi <= 35 or rsi >= 65: score += 8
+        score += abs(rsi - 50) * 0.4 + min(atr_pct, 5)
     elif strategy == "TREND_FOLLOWING":
-        if regime == "STRONG_TREND":
-            score += 10
-        elif regime == "TRENDING":
-            score += 7
-        score += min(adx, 50) * 0.35
-        score += abs(ema_slope) * 3
-        score += min(volume_ratio, 3)
-        score += sentiment * 2
-
+        if regime == "STRONG_TREND": score += 10
+        elif regime == "TRENDING": score += 7
+        score += min(adx, 50) * 0.35 + abs(ema_slope) * 3 + min(volume_ratio, 3) + sentiment * 2
     return max(0, score)
 
 
@@ -683,8 +653,7 @@ def calculate_strategy_score(
 def analyze_coin(symbol):
     try:
         df = get_klines(symbol, "1h", 200)
-        if len(df) < 100:
-            return None
+        if len(df) < 100: return None
         close = df["close"].iloc[-1]
         adx = calculate_adx(df).iloc[-1]
         rsi = calculate_rsi(df).iloc[-1]
@@ -700,51 +669,20 @@ def analyze_coin(symbol):
 
         strategy_results = {}
         for strategy in STRATEGY_NAMES:
-            if not strategy_stats[strategy]["active"]:
-                continue
-            score = calculate_strategy_score(
-                strategy,
-                adx,
-                rsi,
-                atr_pct,
-                volume_ratio,
-                ema_slope,
-                sentiment,
-                regime
-            )
+            if not strategy_stats[strategy]["active"]: continue
+            score = calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slope, sentiment, regime)
             signal = generate_strategy_signal(strategy, df, sentiment, regime)
-            # Directional validation
-            if signal == "BUY" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] < ema50.iloc[-1]:
-                signal = "HOLD"
-            if signal == "SELL" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] > ema50.iloc[-1]:
-                signal = "HOLD"
-            if score < MIN_SIGNAL_SCORE:
-                signal = "HOLD"
+            if signal == "BUY" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] < ema50.iloc[-1]: signal = "HOLD"
+            if signal == "SELL" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] > ema50.iloc[-1]: signal = "HOLD"
+            if score < MIN_SIGNAL_SCORE: signal = "HOLD"
             strategy_results[strategy] = {
-                "strategy": strategy,
-                "symbol": symbol,
-                "price": close,
-                "score": score,
-                "signal": signal,
-                "adx": adx,
-                "rsi": rsi,
-                "atr_pct": atr_pct,
-                "volume_ratio": volume_ratio,
-                "ema_slope": ema_slope,
-                "regime": regime,
-                "sentiment": sentiment
+                "strategy": strategy, "symbol": symbol, "price": close, "score": score, "signal": signal,
+                "adx": adx, "rsi": rsi, "atr_pct": atr_pct, "volume_ratio": volume_ratio,
+                "ema_slope": ema_slope, "regime": regime, "sentiment": sentiment
             }
-        return {
-            "symbol": symbol,
-            "price": close,
-            "adx": adx,
-            "rsi": rsi,
-            "atr_pct": atr_pct,
-            "volume_ratio": volume_ratio,
-            "ema_slope": ema_slope,
-            "regime": regime,
-            "strategies": strategy_results
-        }
+        return {"symbol": symbol, "price": close, "adx": adx, "rsi": rsi, "atr_pct": atr_pct,
+                "volume_ratio": volume_ratio, "ema_slope": ema_slope, "regime": regime,
+                "strategies": strategy_results}
     except Exception as e:
         print(f"❌ analyze_coin {symbol}: {e}")
         return None
@@ -762,25 +700,19 @@ def screen_coins():
     analyses = []
     for symbol in SYMBOLS_POOL:
         result = analyze_coin(symbol)
-        if result:
-            analyses.append(result)
+        if result: analyses.append(result)
 
     strategy_candidates = []
     for strategy in STRATEGY_NAMES:
-        if not strategy_stats[strategy]["active"]:
-            continue
+        if not strategy_stats[strategy]["active"]: continue
         candidates = []
         for coin in analyses:
             result = coin["strategies"].get(strategy)
-            if not result:
-                continue
-            if result["signal"] not in ["BUY", "SELL"]:
-                continue
-            if result["score"] < MIN_SIGNAL_SCORE:
-                continue
+            if not result: continue
+            if result["signal"] not in ["BUY", "SELL"]: continue
+            if result["score"] < MIN_SIGNAL_SCORE: continue
             candidates.append(result)
-        if not candidates:
-            continue
+        if not candidates: continue
         candidates.sort(key=lambda x: x["score"], reverse=True)
         best = candidates[0]
         strategy_candidates.append(best)
@@ -806,24 +738,13 @@ def screen_coins():
     return selected
 
 
-# ==========================================================
-# 📋 SELECTION REPORT
-# ==========================================================
-
 def send_selection_report(selected):
     if not selected:
         send_telegram("⚠️ *SIGNAL ОЛДСОНГҮЙ*\n━━━━━━━━━━━━━━━━━\nЭнэ cycle-д trade нээхгүй.")
         return
     msg = "🏆 *ШИНЭ TOP SIGNALS*\n━━━━━━━━━━━━━━━━━\n"
     for i, coin in enumerate(selected, 1):
-        msg += (
-            f"{i}. `{coin['symbol']}`\n"
-            f"   Strategy: `{coin['strategy']}`\n"
-            f"   Signal: `{coin['signal']}`\n"
-            f"   Score: `{coin['score']:.2f}`\n"
-            f"   ADX: `{coin['adx']:.1f}` | RSI: `{coin['rsi']:.1f}`\n"
-            f"   Regime: `{coin['regime']}`\n\n"
-        )
+        msg += f"{i}. `{coin['symbol']}`\n   Strategy: `{coin['strategy']}`\n   Signal: `{coin['signal']}`\n   Score: `{coin['score']:.2f}`\n   ADX: `{coin['adx']:.1f}` | RSI: `{coin['rsi']:.1f}`\n   Regime: `{coin['regime']}`\n\n"
     send_telegram(msg, pin=True)
 
 
@@ -839,13 +760,10 @@ def get_trade_realized_pnl(symbol, opened_at_ms):
             "startTime": start_time,
             "limit": PNL_LOOKBACK_LIMIT
         })
-        if not isinstance(trades, list):
-            return 0.0
+        if not isinstance(trades, list): return 0.0
         pnl = 0.0
         for trade in trades:
-            trade_time = safe_float(trade.get("time"), 0)
-            if trade_time < start_time:
-                continue
+            if safe_float(trade.get("time"), 0) < start_time: continue
             pnl += safe_float(trade.get("realizedPnl", 0))
         return pnl
     except Exception as e:
@@ -859,45 +777,28 @@ def get_trade_realized_pnl(symbol, opened_at_ms):
 
 def sync_existing_positions():
     positions = get_positions()
-    if not positions:
-        return
+    if not positions: return
     for pos in positions:
         symbol = pos["symbol"]
-        if symbol in active_trade_info:
-            continue
+        if symbol in active_trade_info: continue
         amount = pos["positionAmt"]
         side = "BUY" if amount > 0 else "SELL"
         active_trade_info[symbol] = {
-            "strategy": "RECOVERED",
-            "side": side,
-            "entry_price": pos["entryPrice"],
-            "quantity": abs(amount),
-            "opened_at": time.time(),
-            "opened_at_ms": int(time.time() * 1000),
-            "entry_order_id": None,
-            "sl_order_id": None,
-            "tp_order_id": None,
-            "recovered": True
+            "strategy": "RECOVERED", "side": side,
+            "entry_price": pos["entryPrice"], "quantity": abs(amount),
+            "opened_at": time.time(), "opened_at_ms": int(time.time() * 1000),
+            "entry_order_id": None, "sl_order_id": None, "tp_order_id": None, "recovered": True
         }
         print(f"🔄 RECOVERED POSITION: {symbol}")
-        send_telegram(
-            f"🔄 *POSITION RECOVERED*\n"
-            f"━━━━━━━━━━━━━━━━━\n"
-            f"📌 `{symbol}`\n"
-            f"📈 `{side}`\n"
-            f"💰 Entry: ${pos['entryPrice']:,.4f}\n"
-            f"📦 Qty: `{abs(amount)}`\n"
-            f"⚠️ Strategy metadata lost after restart."
-        )
+        send_telegram(f"🔄 *POSITION RECOVERED*\n━━━━━━━━━━━━━━━━━\n📌 `{symbol}`\n📈 `{side}`\n💰 Entry: ${pos['entryPrice']:,.4f}\n📦 Qty: `{abs(amount)}`\n⚠️ Strategy metadata lost after restart.")
 
 
 # ==========================================================
-# 🚀 EXECUTE TRADES
+# 🚀 EXECUTE TRADES (TRAILING STOP)
 # ==========================================================
 
 def execute_trades(selected_coins, total_balance):
-    if not selected_coins:
-        return
+    if not selected_coins: return
     positions = get_positions()
     existing_symbols = {p["symbol"] for p in positions}
     current_margin_used = 0.0
@@ -909,8 +810,7 @@ def execute_trades(selected_coins, total_balance):
         symbol = coin["symbol"]
         strategy = coin["strategy"]
         signal = coin["signal"]
-        if signal not in ["BUY", "SELL"]:
-            continue
+        if signal not in ["BUY", "SELL"]: continue
         if symbol in existing_symbols:
             print(f"⏸️ {symbol}: already has position")
             continue
@@ -921,14 +821,12 @@ def execute_trades(selected_coins, total_balance):
         if current_margin_used + margin > max_margin:
             print(f"⏸️ {symbol}: portfolio margin limit")
             continue
-        if not ensure_leverage(symbol, LEVERAGE):
-            continue
+        if not ensure_leverage(symbol, LEVERAGE): continue
         price = coin["price"]
         notional = margin * LEVERAGE
         raw_quantity = notional / price
         quantity = round_quantity(symbol, raw_quantity)
-        if quantity <= 0:
-            continue
+        if quantity <= 0: continue
 
         cancel_all_orders(symbol)
         order_side = "BUY" if signal == "BUY" else "SELL"
@@ -941,40 +839,45 @@ def execute_trades(selected_coins, total_balance):
             continue
 
         entry_price = safe_float(order.get("avgPrice"), price)
-        if entry_price <= 0:
-            entry_price = price
+        if entry_price <= 0: entry_price = price
         opened_at_ms = int(time.time() * 1000)
 
+        # TRAILING STOP (СТАТИК SL-ИЙГ ОРЛУУЛНА)
         if signal == "BUY":
-            sl_price = entry_price * (1 - STOP_LOSS_PCT / 100)
-            tp_price = entry_price * (1 + TAKE_PROFIT_PCT / 100)
+            activation_price = round_price(symbol, entry_price * (1 + TRAILING_ACTIVATION_PCT / 100))
+            tp_price = round_price(symbol, entry_price * (1 + TAKE_PROFIT_PCT / 100))
         else:
-            sl_price = entry_price * (1 + STOP_LOSS_PCT / 100)
-            tp_price = entry_price * (1 - TAKE_PROFIT_PCT / 100)
-        sl_price = round_price(symbol, sl_price)
-        tp_price = round_price(symbol, tp_price)
+            activation_price = round_price(symbol, entry_price * (1 - TRAILING_ACTIVATION_PCT / 100))
+            tp_price = round_price(symbol, entry_price * (1 - TAKE_PROFIT_PCT / 100))
 
-        sl_order = place_stop_loss_order(symbol, close_side, quantity, sl_price)
-        if is_api_error(sl_order):
-            send_telegram(f"🚨 *CRITICAL RISK ERROR*\n`{symbol}`\nSL үүссэнгүй.\nPosition хаахыг оролдож байна.")
-            close_result = place_market_order(symbol, close_side, quantity, reduce_only=True)
-            if is_api_error(close_result):
-                send_telegram(f"🚨 *CRITICAL*\n`{symbol}` хаах order failed.")
-            continue
+        trailing_order = place_trailing_stop_order(
+            symbol,
+            close_side,
+            quantity,
+            TRAILING_CALLBACK_RATE,
+            activation_price
+        )
+
+        if is_api_error(trailing_order):
+            send_telegram(f"⚠️ *TRAILING STOP FAILED*\n`{symbol}`\nСтатик SL ашиглаж байна.")
+            sl_price = round_price(symbol, entry_price * (1 - 5 / 100))  # 5% гамшгийн SL
+            sl_order = place_stop_loss_order(symbol, close_side, quantity, sl_price)
+            if is_api_error(sl_order):
+                send_telegram(f"🚨 *CRITICAL*\n`{symbol}` SL failed. Closing position.")
+                place_market_order(symbol, close_side, quantity, reduce_only=True)
+                continue
+        else:
+            print(f"   ✅ Trailing Stop: {TRAILING_CALLBACK_RATE}% | Activation: ${activation_price}")
 
         tp_order = place_take_profit_order(symbol, close_side, quantity, tp_price)
         if is_api_error(tp_order):
-            send_telegram(f"⚠️ *TP FAILED*\n`{symbol}`\nSL идэвхтэй.")
+            send_telegram(f"⚠️ *TP FAILED*\n`{symbol}`\nTrailing Stop идэвхтэй.")
 
         active_trade_info[symbol] = {
-            "strategy": strategy,
-            "side": signal,
-            "entry_price": entry_price,
-            "quantity": quantity,
-            "opened_at": time.time(),
-            "opened_at_ms": opened_at_ms,
+            "strategy": strategy, "side": signal, "entry_price": entry_price, "quantity": quantity,
+            "opened_at": time.time(), "opened_at_ms": opened_at_ms,
             "entry_order_id": order.get("orderId"),
-            "sl_order_id": sl_order.get("orderId") if isinstance(sl_order, dict) else None,
+            "sl_order_id": trailing_order.get("orderId") if not is_api_error(trailing_order) else None,
             "tp_order_id": tp_order.get("orderId") if isinstance(tp_order, dict) else None,
             "recovered": False
         }
@@ -984,25 +887,18 @@ def execute_trades(selected_coins, total_balance):
         send_telegram(
             f"🚀 *ШИНЭ ПОЗИЦ НЭЭГДЛЭЭ*\n"
             f"━━━━━━━━━━━━━━━━━\n"
-            f"📌 `{symbol}`\n"
-            f"📊 Strategy: `{strategy}`\n"
-            f"📈 Signal: `{signal}`\n"
+            f"📌 `{symbol}`\n📊 Strategy: `{strategy}`\n📈 Signal: `{signal}`\n"
             f"💰 Entry: `${entry_price:,.4f}`\n"
-            f"🛑 SL: `${sl_price:,.4f}` (-{STOP_LOSS_PCT:.1f}%)\n"
+            f"🔒 Trailing Stop: {TRAILING_CALLBACK_RATE}% (Activation: ${activation_price})\n"
             f"🎯 TP: `${tp_price:,.4f}` (+{TAKE_PROFIT_PCT:.1f}%)\n"
-            f"📦 Qty: `{quantity}`\n"
-            f"💵 Margin: `${margin:.2f}`\n"
-            f"⚡ Leverage: `{LEVERAGE}x`\n"
-            f"⭐ Score: `{coin['score']:.2f}`\n"
-            f"📈 ADX: `{coin['adx']:.1f}`\n"
-            f"📉 RSI: `{coin['rsi']:.1f}`\n"
-            f"🌊 Regime: `{coin['regime']}`"
+            f"📦 Qty: `{quantity}`\n💵 Margin: `${margin:.2f}`\n⚡ Leverage: `{LEVERAGE}x`\n"
+            f"⭐ Score: `{coin['score']:.2f}`\n📈 ADX: `{coin['adx']:.1f}`\n📉 RSI: `{coin['rsi']:.1f}`\n🌊 Regime: `{coin['regime']}`"
         )
         time.sleep(1)
 
 
 # ==========================================================
-# 📡 MONITOR POSITIONS (5 MIN REPORT WITH SESSION INFO)
+# 📡 MONITOR POSITIONS (5 MIN REPORT + SESSION INFO)
 # ==========================================================
 
 def monitor_positions():
@@ -1016,13 +912,9 @@ def monitor_positions():
     closed_symbols = tracked_symbols - current_symbols
     for symbol in closed_symbols:
         trade_data = active_trade_info.pop(symbol, None)
-        if not trade_data:
-            continue
+        if not trade_data: continue
         strategy = trade_data.get("strategy", "UNKNOWN")
-        opened_at_ms = trade_data.get(
-            "opened_at_ms",
-            int(trade_data.get("opened_at", time.time()) * 1000)
-        )
+        opened_at_ms = trade_data.get("opened_at_ms", int(trade_data.get("opened_at", time.time()) * 1000))
         pnl = get_trade_realized_pnl(symbol, opened_at_ms)
         if strategy != "RECOVERED":
             update_strategy_performance(strategy, pnl)
@@ -1030,22 +922,15 @@ def monitor_positions():
         send_telegram(
             f"{'🟢' if pnl > 0 else '🔴'} *ПОЗИЦ ХААГДЛАА*\n"
             f"━━━━━━━━━━━━━━━━━\n"
-            f"📌 `{symbol}`\n"
-            f"📊 `{strategy}`\n"
-            f"💰 PnL: `{'+' if pnl >= 0 else ''}${pnl:.2f}`"
+            f"📌 `{symbol}`\n📊 `{strategy}`\n💰 PnL: `{'+' if pnl >= 0 else ''}${pnl:.2f}`"
         )
         cancel_all_orders(symbol)
 
-    if not positions:
-        return
+    if not positions: return
 
-    # ======================================================
-    # PERIODIC REPORT (5 MIN) WITH SESSION INFO
-    # ======================================================
-
+    # PERIODIC REPORT (5 MIN)
     now = time.time()
-    if now - last_telegram_report_time < TELEGRAM_REPORT_INTERVAL_SEC:
-        return
+    if now - last_telegram_report_time < TELEGRAM_REPORT_INTERVAL_SEC: return
 
     msg = "📊 *ПОЗИЦЫН МОНИТОР*\n━━━━━━━━━━━━━━━━━\n"
     total_unrealized = 0.0
@@ -1065,13 +950,12 @@ def monitor_positions():
             f"   Qty: `{abs(pos['positionAmt'])}`\n\n"
         )
 
-    # 🆕 SESSION INFO
     current_balance = get_usdt_balance()
     session_profit = total_realized_pnl
     remaining = TARGET_PROFIT - session_profit
 
     msg += (
-        "━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━━\n"
         f"💰 TOTAL UNREALIZED: `{'+' if total_unrealized >= 0 else ''}${total_unrealized:.2f}`\n\n"
         f"📈 *SESSION INFO*\n"
         f"━━━━━━━━━━━━━━━━━\n"
@@ -1090,12 +974,11 @@ def monitor_positions():
 
 def update_strategy_performance(strategy, pnl):
     global total_realized_pnl
-    if strategy not in strategy_stats:
-        return
+    if strategy not in strategy_stats: return
     stats = strategy_stats[strategy]
     stats["trades"] += 1
     stats["total_pnl"] += pnl
-    total_realized_pnl += pnl  # 🎯 ЗОРИЛТЫН АШИГ
+    total_realized_pnl += pnl
 
     if pnl > 0:
         stats["wins"] += 1
@@ -1109,25 +992,18 @@ def update_strategy_performance(strategy, pnl):
             send_telegram(
                 f"⚠️ *STRATEGY PAUSED*\n"
                 f"━━━━━━━━━━━━━━━━━\n"
-                f"📊 `{strategy}`\n"
-                f"📉 Loss streak: `{stats['consecutive_losses']}`\n"
-                f"⏸️ Pause: `{STRATEGY_COOLDOWN_CYCLES}` cycles"
+                f"📊 `{strategy}`\n📉 Loss streak: `{stats['consecutive_losses']}`\n⏸️ Pause: `{STRATEGY_COOLDOWN_CYCLES}` cycles"
             )
 
 
 def update_strategy_cooldowns():
     for strategy, stats in strategy_stats.items():
-        if stats["paused_cycles"] <= 0:
-            continue
+        if stats["paused_cycles"] <= 0: continue
         stats["paused_cycles"] -= 1
         if stats["paused_cycles"] <= 0:
             stats["active"] = True
             stats["consecutive_losses"] = 0
-            send_telegram(
-                f"🔄 *STRATEGY REACTIVATED*\n"
-                f"━━━━━━━━━━━━━━━━━\n"
-                f"📊 `{strategy}`"
-            )
+            send_telegram(f"🔄 *STRATEGY REACTIVATED*\n━━━━━━━━━━━━━━━━━\n📊 `{strategy}`")
 
 
 def get_active_strategies():
@@ -1135,24 +1011,15 @@ def get_active_strategies():
 
 
 def send_performance_report():
-    if not STRATEGY_PERFORMANCE_TRACKING:
-        return
+    if not STRATEGY_PERFORMANCE_TRACKING: return
     msg = "📊 *СТРАТЕГИЙН ГҮЙЦЭТГЭЛ*\n━━━━━━━━━━━━━━━━━\n"
     total_pnl = 0.0
     for strategy, stats in strategy_stats.items():
-        if stats["trades"] == 0:
-            continue
+        if stats["trades"] == 0: continue
         win_rate = stats["wins"] / stats["trades"] * 100
         status = "🟢 ACTIVE" if stats["active"] else "🔴 PAUSED"
         pnl = stats["total_pnl"]
-        msg += (
-            f"🔹 `{strategy}` {status}\n"
-            f"   Trades: `{stats['trades']}`\n"
-            f"   Win: `{stats['wins']}` | Loss: `{stats['losses']}`\n"
-            f"   Win rate: `{win_rate:.1f}%`\n"
-            f"   PnL: `{'+' if pnl >= 0 else ''}${pnl:.2f}`\n"
-            f"   Loss streak: `{stats['consecutive_losses']}`\n\n"
-        )
+        msg += f"🔹 `{strategy}` {status}\n   Trades: `{stats['trades']}`\n   Win: `{stats['wins']}` | Loss: `{stats['losses']}`\n   Win rate: `{win_rate:.1f}%`\n   PnL: `{'+' if pnl >= 0 else ''}${pnl:.2f}`\n   Loss streak: `{stats['consecutive_losses']}`\n\n"
         total_pnl += pnl
     msg += f"━━━━━━━━━━━━━━━━━\n💰 TOTAL PnL: `{'+' if total_pnl >= 0 else ''}${total_pnl:.2f}`"
     send_telegram(msg)
@@ -1180,14 +1047,14 @@ def send_cycle_summary():
 
 
 # ==========================================================
-# 🚀 MAIN
+# 🚀 MAIN (UNREALIZED 300$-г ХЯНАЖ, ХААЖ, REALIZED БОЛГОНО)
 # ==========================================================
 
 def main():
     global last_cycle_balance, cycle_start_time, total_realized_pnl, session_start_balance
 
     print("=" * 70)
-    print("🤖 SMART MULTI-STRATEGY PORTFOLIO BOT v3 (Target: 300$)")
+    print("🤖 SMART BOT (UNREALIZED -> REALIZED AUTO CLOSE @ 300$)")
     print("=" * 70)
 
     try:
@@ -1207,25 +1074,16 @@ def main():
         print(f"❌ Position sync: {e}")
 
     send_telegram(
-        "🤖 *SMART PORTFOLIO BOT v3 АСЛАА*\n"
+        "🤖 *SMART BOT АСЛАА! (UNREALIZED TARGET)*\n"
         "━━━━━━━━━━━━━━━━━\n"
         "📊 6 Strategy × 15 Coins\n"
-        "🏆 Strategy-centric selection\n"
-        "🎯 Best coin per strategy\n"
-        "🔄 Duplicate resolution\n"
-        "🏆 Top 6 signals\n"
-        "📈 BUY + SELL\n"
-        "🧠 Market regime\n"
-        "🛡️ SL / TP\n"
-        "🔄 Adaptive strategy\n"
-        "📊 Performance tracking\n"
-        "🔄 Position recovery\n"
-        f"🎯 Target Profit: `${TARGET_PROFIT}`"
+        "🔒 Trailing Stop (0.5% callback)\n"
+        f"🎯 Target: Unrealized PnL >= `${TARGET_PROFIT}` -> Auto Close ALL"
     )
 
     try:
         last_cycle_balance = get_usdt_balance()
-        session_start_balance = last_cycle_balance  # 🆕 Session start хадгална
+        session_start_balance = last_cycle_balance
     except Exception:
         last_cycle_balance = 0.0
         session_start_balance = 0.0
@@ -1255,15 +1113,52 @@ def main():
             except Exception as e:
                 print(f"❌ Monitor: {e}")
 
-            # 🎯 TARGET PROFIT CHECK
+            # ==================================================
+            # 🎯 UNREALIZED PNL TARGET CHECK (Шинэ гол логик)
+            # ==================================================
+            positions = get_positions()
+            total_unrealized = sum(pos["unRealizedProfit"] for pos in positions) if positions else 0.0
+
+            if total_unrealized >= TARGET_PROFIT:
+                msg = (
+                    f"🎯 *ЗОРИЛТЫН UNREALIZED PNL ХҮРСЭН!*\n"
+                    f"━━━━━━━━━━━━━━━━━\n"
+                    f"💰 Unrealized PnL: `${total_unrealized:.2f}`\n"
+                    f"🎯 Зорилт: `${TARGET_PROFIT:.2f}`\n"
+                    f"🔒 Бүх позицуудыг хааж, REALIZED болгож байна..."
+                )
+                send_telegram(msg)
+                print(f"\n✅ {msg}\n")
+
+                # Бүх позицоо хаах
+                closed = close_all_positions()
+                time.sleep(2)
+
+                # Шинэ баланс
+                new_balance = get_usdt_balance()
+                # Realized PnL-г шинэчлэх (бота зогсох гэж байгаа учраас заавал биш)
+                msg2 = (
+                    f"✅ *БҮХ ПОЗИЦ ХААГДЛАА!*\n"
+                    f"━━━━━━━━━━━━━━━━━\n"
+                    f"🔒 Хаагдсан позиц: `{closed}`\n"
+                    f"💰 Шинэ баланс: `${new_balance:.2f}`\n"
+                    f"💵 UNREALIZED -> REALIZED боллоо!\n"
+                    f"⏸️ Бот зогсож байна.\n"
+                    f"🔄 10 минутын дараа дахин эхлэх болно."
+                )
+                send_telegram(msg2)
+                print(f"\n✅ {msg2}\n")
+                
+                sys.exit(0)
+
+            # 🎯 REALIZED PNL CHECK (Нөөцлөлт)
             if total_realized_pnl >= TARGET_PROFIT:
                 msg = (
-                    f"🎯 *ЗОРИЛТОТ АШИГ ХҮРСЭН!*\n"
+                    f"🎯 *ЗОРИЛТЫН БОДИТ АШИГ ХҮРСЭН!*\n"
                     f"━━━━━━━━━━━━━━━━━\n"
                     f"💰 Бодит ашиг: `${total_realized_pnl:.2f}`\n"
                     f"🎯 Зорилт: `${TARGET_PROFIT:.2f}`\n"
-                    f"⏸️ Бот зогсож байна.\n"
-                    f"🔄 Дахин эхлүүлэхийн тулд гарын авлагаар асаана уу."
+                    f"⏸️ Бот зогсож байна."
                 )
                 send_telegram(msg)
                 print(f"\n✅ {msg}\n")
