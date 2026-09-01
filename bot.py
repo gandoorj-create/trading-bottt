@@ -182,7 +182,7 @@ def current_timestamp_ms():
 # 📱 TELEGRAM
 # ==========================================================
 
-def send_telegram(text, pin=False):
+def send_telegram(text, pin=False, parse_mode=None):   # parse_mode-г None болгов
     if not BOT_TOKEN or not CHAT_ID:
         return False
     try:
@@ -190,7 +190,7 @@ def send_telegram(text, pin=False):
         payload = {
             "chat_id": CHAT_ID,
             "text": text,
-            "parse_mode": "Markdown"
+            "parse_mode": parse_mode   # энд None дамжина
         }
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code != 200:
@@ -1957,14 +1957,15 @@ def main():
     if BACKTEST_ENABLED:
         try:
             print("\n🧪 Running initial backtest for all strategies...")
-            test_symbols = SYMBOLS_POOL[:2]
+            test_symbols = SYMBOLS_POOL[:2]   # зөвхөн эхний 2 монет
             for strategy in STRATEGY_NAMES:
                 if strategy == "GRID_TRADING":
                     continue
                 for symbol in test_symbols:
                     report = run_backtest(symbol, strategy, days=BACKTEST_DAYS, interval=BACKTEST_INTERVAL)
-                    if report and "error" not in report.lower() and "хангалттай" not in report:
-                        send_telegram(report)
+                    # Шүүлтийг сулруулсан: "хангалттай" гэх үг агуулаагүй л бол бүх тайланг илгээнэ
+                    if report and "хангалттай" not in report:
+                        send_telegram(report)   # parse_mode default None учраас алдаа гарахгүй
                     time.sleep(1)
         except Exception as e:
             print(f"❌ Backtest error: {e}")
