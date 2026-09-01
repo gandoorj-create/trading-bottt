@@ -1,58 +1,11 @@
 """
 telegram_format.py
-Telegram мэдэгдлүүдийг цэвэр, албан ёсны хэлбэрт оруулах.
-HTML хэлбэржүүлэлт ашигласан.
-Label-ууд: Доогуур зураас + Тод (Underline + Bold) -> дулаахан, тод харагдац.
-Утгууд: Энгийн текст (хар / theme-ийн өнгө).
+Telegram мэдэгдлүүдийг ЦЭВЭР ЭНГИН ТЕКСТ хэлбэрт оруулах.
+Ямар ч тодруулгагүй (bold, italic, underline, HTML байхгүй).
+Зөвхөн тэгшлэсэн текст + хоёр цэг.
 """
 
 import re
-
-
-# ---------- Орчуулгын толь ----------
-_TRANSLATIONS = {
-    "Symbol": "Бэлгэ тэмдэг / Symbol",
-    "Strategy": "Стратеги / Strategy",
-    "Signal": "Дохио / Signal",
-    "Side": "Чиглэл / Side",
-    "Entry": "Нээсэн үнэ / Entry",
-    "Mark": "Одоогийн үнэ / Mark",
-    "PnL": "Ашиг/Алдагдал / PnL",
-    "Qty": "Хэмжээ / Qty",
-    "Price": "Үнэ / Price",
-    "Error": "Алдаа / Error",
-    "Status": "Төлөв / Status",
-    "Details": "Дэлгэрэнгүй / Details",
-    "Note": "Анхаар / Note",
-    "Target": "Зорилт / Target",
-    "Balance": "Үлдэгдэл / Balance",
-    "New Balance": "Шинэ үлдэгдэл / New Balance",
-    "Margin": "Дансны хувь / Margin",
-    "Leverage": "Хөшүүрэг / Leverage",
-    "Allocation": "Хуваарилалт / Allocation",
-    "Time": "Цаг / Time",
-    "Period": "Хугацаа / Period",
-    "Open Positions": "Нээлттэй позиц / Open Positions",
-    "Active strategies": "Идэвхтэй стратеги / Active strategies",
-    "Score": "Оноо / Score",
-    "ADX": "ADX",
-    "RSI": "RSI",
-    "Regime": "Зах зээлийн төлөв / Regime",
-    "ADX / RSI": "ADX / RSI",
-    "Take Profit": "Ашиг түгжих / Take Profit",
-    "Stop Loss": "Алдагдал хязгаар / Stop Loss",
-    "Trailing": "Аялгын зогсоолт / Trailing",
-    "Activation": "Идэвхжүүлэх үнэ / Activation",
-    "Callback": "Буцах хувь / Callback",
-    "Trades": "Арилжааны тоо / Trades",
-    "Win / Loss": "Хожсон / Алдсан",
-    "Win rate": "Хожлын хувь / Win rate",
-    "Loss streak": "Дараалсан алдагдал / Loss streak",
-    "Unrealized": "Нийт реализаагүй / Unrealized",
-    "Session Realized": "Сессийн ашиг / Session PnL",
-    "Realized PnL": "Бодит ашиг / Realized PnL",
-    "Balance change": "Үлдэгдлийн өөрчлөлт / Balance change",
-}
 
 
 def money(value, decimals=2):
@@ -62,7 +15,7 @@ def money(value, decimals=2):
 
 
 def _clean_text(text):
-    """Текстээс emoji-г арилгах"""
+    """Текстээс emoji-г бүрэн арилгах"""
     emoji_pattern = re.compile("["
         u"\U0001F600-\U0001F64F"
         u"\U0001F300-\U0001F5FF"
@@ -84,74 +37,101 @@ def _clean_text(text):
 
 
 def _translate_label(label):
-    """Label-г орчуулах"""
+    """Label-ийн монгол/англи орчуулга"""
+    translations = {
+        "Symbol": "Бэлгэ тэмдэг / Symbol",
+        "Strategy": "Стратеги / Strategy",
+        "Signal": "Дохио / Signal",
+        "Side": "Чиглэл / Side",
+        "Entry": "Нээсэн үнэ / Entry",
+        "Mark": "Одоогийн үнэ / Mark",
+        "PnL": "Ашиг/Алдагдал / PnL",
+        "Qty": "Хэмжээ / Qty",
+        "Price": "Үнэ / Price",
+        "Error": "Алдаа / Error",
+        "Status": "Төлөв / Status",
+        "Details": "Дэлгэрэнгүй / Details",
+        "Note": "Анхаар / Note",
+        "Target": "Зорилт / Target",
+        "Balance": "Үлдэгдэл / Balance",
+        "New Balance": "Шинэ үлдэгдэл / New Balance",
+        "Margin": "Дансны хувь / Margin",
+        "Leverage": "Хөшүүрэг / Leverage",
+        "Allocation": "Хуваарилалт / Allocation",
+        "Time": "Цаг / Time",
+        "Period": "Хугацаа / Period",
+        "Open Positions": "Нээлттэй позиц / Open Positions",
+        "Active strategies": "Идэвхтэй стратеги / Active strategies",
+        "Score": "Оноо / Score",
+        "ADX": "ADX",
+        "RSI": "RSI",
+        "Regime": "Зах зээлийн төлөв / Regime",
+        "ADX / RSI": "ADX / RSI",
+        "Take Profit": "Ашиг түгжих / Take Profit",
+        "Stop Loss": "Алдагдал хязгаар / Stop Loss",
+        "Trailing": "Аялгын зогсоолт / Trailing",
+        "Activation": "Идэвхжүүлэх үнэ / Activation",
+        "Callback": "Буцах хувь / Callback",
+        "Trades": "Арилжааны тоо / Trades",
+        "Win / Loss": "Хожсон / Алдсан",
+        "Win rate": "Хожлын хувь / Win rate",
+        "Loss streak": "Дараалсан алдагдал / Loss streak",
+        "Unrealized": "Нийт реализаагүй / Unrealized",
+        "Session Realized": "Сессийн ашиг / Session PnL",
+        "Realized PnL": "Бодит ашиг / Realized PnL",
+        "Balance change": "Үлдэгдлийн өөрчлөлт / Balance change",
+    }
     if "/" in label:
         return label
-    return _TRANSLATIONS.get(label, label)
+    return translations.get(label, label)
 
 
-def _format_rows(rows, indent=2):
+def _format_rows(rows, indent=0):
     """
     rows: (label, value) хосын жагсаалт.
-    Label-уудыг HTML-ээр <u><b>...</b></u> (доогуур зураас + тод) болгоно.
-    Утгуудыг энгийн текстээр үлдээнэ.
+    Бүх label-ийг тэгшлээд ' : ' таслалаар холбоно.
     """
     if not rows:
         return ""
 
-    valid_rows = []
-    for label, value in rows:
-        if value is None:
-            continue
-        translated_label = _translate_label(label)
-        valid_rows.append((translated_label, value))
-
+    valid_rows = [(l, v) for l, v in rows if v is not None]
     if not valid_rows:
         return ""
 
     max_label_len = max(len(label) for label, _ in valid_rows)
     lines = []
     for label, value in valid_rows:
-        # Label-ыг доогуур зураас + тод болгох (дулаахан, тод харагдац)
-        label_html = f"<u><b>{label.ljust(max_label_len)}</b></u>"
-        lines.append(f"{' ' * indent}{label_html} : {value}")
+        # Label-ыг зүүн тийш тэгшлэх
+        lines.append(f"{' ' * indent}{label.ljust(max_label_len)} : {value}")
     return "\n".join(lines)
 
 
 def format_block(title, emoji, rows):
     """
-    Нэг блок форматлах (зураасгүй)
+    Нэг блок форматлах (зураас, тодруулгагүй)
     """
-    clean_title = _clean_text(title)
-    header = f"<b>{clean_title}</b>"
-    body = _format_rows(rows)
+    clean_title = _clean_text(title)  # emoji-г арилгах
+    body = _format_rows(rows, indent=0)
     if body:
-        return f"{header}\n{body}"
-    else:
-        return header
+        return f"{clean_title}\n{body}"
+    return clean_title
 
 
 def format_section(title, emoji, sections):
     """
-    Олон блоктой мессеж (зураасгүй)
+    Олон блоктой мессеж (зураас, тодруулгагүй)
     """
     clean_title = _clean_text(title)
-    header = f"<b>{clean_title}</b>"
-
     parts = []
     for sub_title, rows in sections:
         if not rows:
             continue
         clean_sub = _clean_text(sub_title) if sub_title else ""
-        block = ""
-        if clean_sub:
-            block = f"<b>{clean_sub}</b>"
-        body = _format_rows(rows)
+        body = _format_rows(rows, indent=0)
         if body:
-            if block:
-                parts.append(f"{block}\n{body}")
+            if clean_sub:
+                parts.append(f"{clean_sub}\n{body}")
             else:
                 parts.append(body)
-
     body = "\n\n".join(parts)
-    return f"{header}\n{body}"
+    return f"{clean_title}\n{body}"
