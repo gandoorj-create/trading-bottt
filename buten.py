@@ -90,10 +90,11 @@ strategy_stats = {
 
 
 # ==========================================================
-# 💰 TOTAL REALIZED PNL
+# 💰 TOTAL REALIZED PNL & SESSION START
 # ==========================================================
 
 total_realized_pnl = 0.0
+session_start_balance = 0.0
 
 
 # ==========================================================
@@ -1001,15 +1002,17 @@ def execute_trades(selected_coins, total_balance):
 
 
 # ==========================================================
-# 📡 MONITOR POSITIONS
+# 📡 MONITOR POSITIONS (5 MIN REPORT WITH SESSION INFO)
 # ==========================================================
 
 def monitor_positions():
-    global last_telegram_report_time
+    global last_telegram_report_time, session_start_balance, total_realized_pnl
+
     positions = get_positions()
     current_symbols = {p["symbol"] for p in positions}
     tracked_symbols = set(active_trade_info.keys())
 
+    # CLOSED POSITIONS
     closed_symbols = tracked_symbols - current_symbols
     for symbol in closed_symbols:
         trade_data = active_trade_info.pop(symbol, None)
@@ -1036,16 +1039,20 @@ def monitor_positions():
     if not positions:
         return
 
+    # ======================================================
+    # PERIODIC REPORT (5 MIN) WITH SESSION INFO
+    # ======================================================
+
     now = time.time()
     if now - last_telegram_report_time < TELEGRAM_REPORT_INTERVAL_SEC:
         return
 
     msg = "📊 *ПОЗИЦЫН МОНИТОР*\n━━━━━━━━━━━━━━━━━\n"
-    total_pnl = 0.0
+    total_unrealized = 0.0
     for pos in positions:
         symbol = pos["symbol"]
         pnl = pos["unRealizedProfit"]
-        total_pnl += pnl
+        total_unrealized += pnl
         trade_data = active_trade_info.get(symbol, {})
         strategy = trade_data.get("strategy", "UNKNOWN")
         side = trade_data.get("side", "UNKNOWN")
@@ -1057,10 +1064,22 @@ def monitor_positions():
             f"   PnL: `{'+' if pnl >= 0 else ''}${pnl:.2f}`\n"
             f"   Qty: `{abs(pos['positionAmt'])}`\n\n"
         )
+
+    # 🆕 SESSION INFO
+    current_balance = get_usdt_balance()
+    session_profit = total_realized_pnl
+    remaining = TARGET_PROFIT - session_profit
+
     msg += (
+        "━━━━━━━━━━━━━━━━━\n"
+        f"💰 TOTAL UNREALIZED: `{'+' if total_unrealized >= 0 else ''}${total_unrealized:.2f}`\n\n"
+        f"📈 *SESSION INFO*\n"
         f"━━━━━━━━━━━━━━━━━\n"
-        f"💰 TOTAL UNREALIZED: `{'+' if total_pnl >= 0 else ''}${total_pnl:.2f}`"
+        f"💵 Starting Balance: `${session_start_balance:,.2f}`\n"
+        f"💰 Session Profit: `{'+' if session_profit >= 0 else ''}${session_profit:.2f}`\n"
+        f"🎯 Remaining to Target: `{'+' if remaining >= 0 else ''}${remaining:.2f}`"
     )
+
     send_telegram(msg)
     last_telegram_report_time = now
 
@@ -1165,7 +1184,7 @@ def send_cycle_summary():
 # ==========================================================
 
 def main():
-    global last_cycle_balance, cycle_start_time, total_realized_pnl
+    global last_cycle_balance, cycle_start_time, total_realized_pnl, session_start_balance
 
     print("=" * 70)
     print("🤖 SMART MULTI-STRATEGY PORTFOLIO BOT v3 (Target: 300$)")
@@ -1206,8 +1225,10 @@ def main():
 
     try:
         last_cycle_balance = get_usdt_balance()
+        session_start_balance = last_cycle_balance  # 🆕 Session start хадгална
     except Exception:
         last_cycle_balance = 0.0
+        session_start_balance = 0.0
     cycle_start_time = time.time()
 
     # Initial screening
