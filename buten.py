@@ -15,34 +15,16 @@ from urllib.parse import urlencode
 
 
 # ==========================================================
-# 🔐 ENVIRONMENT
+# 🔐 API / TELEGRAM ТОХИРГОО (шууд оруулсан)
 # ==========================================================
-#
-# Set these BEFORE running:
-#  
-
-
-# BINANCE_API_KEY
-# BINANCE_API_SECRET
-# BINANCE_BASE_URL
-# TELEGRAM_BOT_TOKEN
-# TELEGRAM_CHAT_ID
-# TELEGRAM_API_ROOT
-#
-# BINANCE_BASE_URL should be your Binance Futures DEMO endpoint.
-# TELEGRAM_API_ROOT should be Telegram Bot API root.
-#
-# DO NOT hardcode secrets into this file.
-# ==========================================================
-
 
 API_KEY = "tyRDudce0UlVVEA9jqLRbiHulMGlCtzIMsBQqduZtrARuxFhHgJJVuoYk7l3TvrG"
 API_SECRET = "4NuMPGZhbsMfAerDIQeyBV0vR1v7aOuwSh8tm3RrQUPm1HkUNf1DQB98neXutUKX"
 BASE_URL = "https://demo-fapi.binance.com"
 
-# Telegram Bot тохиргоо
 BOT_TOKEN = "8786518803:AAG8yVyTdBfOw0pOsieHOynoQnt7Qr7nl94"
 CHAT_ID = "6886167068"
+TELEGRAM_API_ROOT = "https://api.telegram.org"
 
 
 # ==========================================================
