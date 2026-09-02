@@ -3,6 +3,7 @@ telegram_format.py
 Telegram мэдэгдлүүдийг ЦЭВЭР ЭНГИН ТЕКСТ хэлбэрт оруулах.
 Ямар ч тодруулгагүй (bold, italic, underline, HTML байхгүй).
 Зөвхөн тэгшлэсэн текст + хоёр цэг.
+Бүх label-ууд Англи / Монгол 2 хэлээр харагдана.
 """
 
 import re
@@ -37,8 +38,9 @@ def _clean_text(text):
 
 
 def _translate_label(label):
-    """Label-ийн монгол/англи орчуулга"""
+    """Label-ийн Монгол / Англи орчуулга (2 хэл)"""
     translations = {
+        # Үндсэн арилжааны мэдээлэл
         "Symbol": "Бэлгэ тэмдэг / Symbol",
         "Strategy": "Стратеги / Strategy",
         "Signal": "Дохио / Signal",
@@ -48,41 +50,81 @@ def _translate_label(label):
         "PnL": "Ашиг/Алдагдал / PnL",
         "Qty": "Хэмжээ / Qty",
         "Price": "Үнэ / Price",
-        "Error": "Алдаа / Error",
-        "Status": "Төлөв / Status",
-        "Details": "Дэлгэрэнгүй / Details",
-        "Note": "Анхаар / Note",
-        "Target": "Зорилт / Target",
-        "Balance": "Үлдэгдэл / Balance",
-        "New Balance": "Шинэ үлдэгдэл / New Balance",
         "Margin": "Дансны хувь / Margin",
         "Leverage": "Хөшүүрэг / Leverage",
         "Allocation": "Хуваарилалт / Allocation",
-        "Time": "Цаг / Time",
-        "Period": "Хугацаа / Period",
+        "Balance": "Үлдэгдэл / Balance",
+        "New Balance": "Шинэ үлдэгдэл / New Balance",
+        "Balance change": "Үлдэгдлийн өөрчлөлт / Balance change",
         "Open Positions": "Нээлттэй позиц / Open Positions",
-        "Active strategies": "Идэвхтэй стратеги / Active strategies",
+        
+        # Дохионы мэдээлэл
         "Score": "Оноо / Score",
-        "ADX": "ADX",
-        "RSI": "RSI",
-        "Regime": "Зах зээлийн төлөв / Regime",
+        "ADX": "ADX / ADX",
+        "RSI": "RSI / RSI",
         "ADX / RSI": "ADX / RSI",
+        "Regime": "Зах зээлийн төлөв / Regime",
+        "Active strategies": "Идэвхтэй стратеги / Active strategies",
+        
+        # Эрсдэлийн мэдээлэл
         "Take Profit": "Ашиг түгжих / Take Profit",
         "Stop Loss": "Алдагдал хязгаар / Stop Loss",
         "Trailing": "Аялгын зогсоолт / Trailing",
         "Activation": "Идэвхжүүлэх үнэ / Activation",
         "Callback": "Буцах хувь / Callback",
+        "Emergency SL": "Яаралтай хязгаар / Emergency SL",
+        
+        # Статистик
         "Trades": "Арилжааны тоо / Trades",
         "Win / Loss": "Хожсон / Алдсан",
         "Win rate": "Хожлын хувь / Win rate",
         "Loss streak": "Дараалсан алдагдал / Loss streak",
+        "Total PnL": "Нийт ашиг/алдагдал / Total PnL",
+        "Net PnL": "Цэвэр ашиг/алдагдал / Net PnL",
+        "Avg Win": "Дундаж хожлын хэмжээ / Avg Win",
+        "Avg Loss": "Дундаж алдагдлын хэмжээ / Avg Loss",
+        "Max Profit": "Хамгийн их ашиг / Max Profit",
+        "Max Drawdown": "Хамгийн их уналт / Max Drawdown",
+        "Profit Factor": "Ашгийн хүчин зүйл / Profit Factor",
+        "Expectancy/Trade": "Хүлээгдэж буй ашиг/арилжаа / Expectancy/Trade",
+        "Fee model": "Хураамжийн загвар / Fee model",
+        "Slippage model": "Гулсалтын загвар / Slippage model",
+        "Note": "Анхаар / Note",
+        
+        # Нийт үзүүлэлт
         "Unrealized": "Нийт реализаагүй / Unrealized",
-        "Session Realized": "Сессийн ашиг / Session PnL",
+        "Session Realized": "Сессийн ашиг / Session Realized",
         "Realized PnL": "Бодит ашиг / Realized PnL",
-        "Balance change": "Үлдэгдлийн өөрчлөлт / Balance change",
+        "Target": "Зорилт / Target",
+        "Period": "Хугацаа / Period",
+        "Time": "Цаг / Time",
+        "Status": "Төлөв / Status",
+        "Details": "Дэлгэрэнгүй / Details",
+        "Error": "Алдаа / Error",
+        "Action": "Үйлдэл / Action",
+        
+        # DCA болон бусад
+        "Drawdown": "Уналт / Drawdown",
+        "Peak Balance": "Хамгийн өндөр үлдэгдэл / Peak Balance",
+        "Current Balance": "Одоогийн үлдэгдэл / Current Balance",
+        "Limit": "Хязгаар / Limit",
+        "Level": "Түвшин / Level",
+        "Added Qty": "Нэмсэн хэмжээ / Added Qty",
+        "New Avg Price": "Шинэ дундаж үнэ / New Avg Price",
+        "Total Qty": "Нийт хэмжээ / Total Qty",
+        "Pause": "Түр зогсолт / Pause",
+        
+        # Backtest
+        "Period": "Хугацаа / Period",
+        "Note": "Анхаар / Note",
     }
-    if "/" in label:
+    
+    # Хэрэв label нь "/" тэмдэгт агуулж байвал (жишээ нь "ADX / RSI") 
+    # түүнийг бүхэлд нь орчуулах гэж оролдох, эсвэл хэвээр үлдээх
+    if "/" in label and label not in translations:
         return label
+    
+    # Хэрэв key байхгүй бол анхны label-ыг буцаах
     return translations.get(label, label)
 
 
@@ -94,14 +136,14 @@ def _format_rows(rows, indent=0):
     if not rows:
         return ""
 
-    valid_rows = [(l, v) for l, v in rows if v is not None]
-    if not valid_rows:
+    # Label-уудыг Монгол / Англи хэлээр орчуулах
+    translated_rows = [(_translate_label(label), value) for label, value in rows if value is not None]
+    if not translated_rows:
         return ""
 
-    max_label_len = max(len(label) for label, _ in valid_rows)
+    max_label_len = max(len(label) for label, _ in translated_rows)
     lines = []
-    for label, value in valid_rows:
-        # Label-ыг зүүн тийш тэгшлэх
+    for label, value in translated_rows:
         lines.append(f"{' ' * indent}{label.ljust(max_label_len)} : {value}")
     return "\n".join(lines)
 
@@ -110,7 +152,7 @@ def format_block(title, emoji, rows):
     """
     Нэг блок форматлах (зураас, тодруулгагүй)
     """
-    clean_title = _clean_text(title)  # emoji-г арилгах
+    clean_title = _clean_text(title)
     body = _format_rows(rows, indent=0)
     if body:
         return f"{clean_title}\n{body}"
