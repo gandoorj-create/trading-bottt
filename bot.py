@@ -38,20 +38,6 @@ from telegram_format import format_block, format_section, money
 from settings import *
 
 # ==========================================================
-# 📦 ТОХИРГОО
-# ==========================================================
-CHOP_PERIOD = getattr(settings, 'CHOP_PERIOD', 14)
-SUPERTREND_PERIOD = getattr(settings, 'SUPERTREND_PERIOD', 10)
-SUPERTREND_MULTIPLIER = getattr(settings, 'SUPERTREND_MULTIPLIER', 3)
-MTF_ENABLED = getattr(settings, 'MTF_ENABLED', True)
-VWAP_ENABLED = getattr(settings, 'VWAP_ENABLED', True)
-FUNDING_ENABLED = getattr(settings, 'FUNDING_ENABLED', True)
-ORDER_BOOK_ENABLED = getattr(settings, 'ORDER_BOOK_ENABLED', True)
-ORDER_BOOK_LIMIT = getattr(settings, 'ORDER_BOOK_LIMIT', 20)
-CHART_ENABLED = getattr(settings, 'CHART_ENABLED', True)
-CHART_SEND_ON_SIGNAL = getattr(settings, 'CHART_SEND_ON_SIGNAL', True)
-
-# ==========================================================
 # 📦 STATE PERSISTENCE
 # ==========================================================
 STRATEGY_STATE_FILE = os.path.join(os.path.dirname(__file__), "strategy_state.json")
@@ -244,7 +230,6 @@ def send_telegram(text, pin=False):
         return False
 
 def send_telegram_photo(photo_bytes, caption=""):
-    """Telegram-д зураг (chart) илгээх"""
     if not BOT_TOKEN or not CHAT_ID:
         return False
     try:
@@ -530,7 +515,6 @@ def cancel_all_orders(symbol):
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def cancel_all_algo_orders(symbol):
-    """ЗӨВ арга: GET /openAlgoOrders → DELETE /algoOrder"""
     try:
         orders = send_signed_request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
         if not isinstance(orders, list):
@@ -598,9 +582,6 @@ def find_strong_levels(symbol, price):
     bids, asks = get_order_book(symbol, ORDER_BOOK_LIMIT)
     if not bids or not asks:
         return None, None
-    
-    total_bid_volume = sum(b[1] for b in bids)
-    total_ask_volume = sum(a[1] for a in asks)
     
     strong_bid = max(bids, key=lambda x: x[1]) if bids else None
     strong_ask = max(asks, key=lambda x: x[1]) if asks else None
@@ -1048,7 +1029,6 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         vwap = calculate_vwap(df).iloc[-1]
         funding_rate = get_funding_rate(symbol)
         
-        # Order Book-оос хүчтэй түвшингүүд
         support, resistance = find_strong_levels(symbol, close)
         if support and resistance:
             print(f"🔹 {symbol} Support: {support:.2f} | Resistance: {resistance:.2f}")
@@ -1213,7 +1193,6 @@ def screen_coins():
     for i, coin in enumerate(selected, 1):
         print(f"{i}. {coin['symbol']} | {coin['strategy']} | {coin['signal']} | Score={coin['score']:.2f}")
 
-    # Дохио гарсан coin-д график илгээх
     if CHART_SEND_ON_SIGNAL:
         for coin in selected:
             symbol = coin['symbol']
