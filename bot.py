@@ -17,6 +17,15 @@ from urllib.parse import urlencode
 from telegram_format import format_block, format_section, money
 from settings import *
 
+# ==========================================================
+# 📦 ШИНЭ ТОХИРГОО (Default утгууд - settings.py-д нэмэх)
+# ==========================================================
+CHOP_PERIOD = 14
+SUPERTREND_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3
+MTF_ENABLED = True
+VWAP_ENABLED = True
+FUNDING_ENABLED = True
 
 # ==========================================================
 # 📦 STATE PERSISTENCE
@@ -26,11 +35,11 @@ BACKTEST_FEE_RATE = 0.0004
 BACKTEST_SLIPPAGE_RATE = 0.0005
 
 # ==========================================================
-# 🧠 STRATEGY SETTINGS
+# 🧠 STRATEGY SETTINGS (Шинэчлэгдсэн: EMA_CROSSOVER -> SUPERTREND)
 # ==========================================================
 
 STRATEGY_NAMES = [
-    "EMA_CROSSOVER",
+    "SUPERTREND",                # Хуучин EMA-г орлох
     "MACD_MOMENTUM",
     "GRID_TRADING",
     "BOLLINGER_MEAN_REVERSION",
@@ -191,7 +200,6 @@ def send_telegram(text, pin=False):
         payload = {
             "chat_id": CHAT_ID,
             "text": text,
-            # parse_mode-г бүрмөсөн хасав
         }
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code != 200:
@@ -512,7 +520,109 @@ def get_klines(symbol, interval="1h", limit=200):
 
 
 # ==========================================================
-# 📊 INDICATORS
+# 📊 ШИНЭ ҮЗҮҮЛЭЛТҮҮД (CHOP, SUPERTREND, VWAP, FUNDING, MTF)
+# ==========================================================
+
+def calculate_chop(df, period=14):
+    """Choppiness Index - зах зээлийн тренд/range тодорхойлох (0-100)"""
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    
+    atr_sum = (high - low).rolling(period).sum()
+    max_high = high.rolling(period).max()
+    min_low = low.rolling(period).min()
+    
+    # 0-д хуваахаас сэргийлэх
+    denominator = (max_high - min_low)
+    denominator = denominator.replace(0, np.nan)
+    
+    chop = 100 * np.log10(atr_sum / denominator) / np.log10(period)
+    return chop.fillna(50)
+
+def calculate_supertrend(df, period=10, multiplier=3):
+    """Supertrend индикатор - Trend Following дохио"""
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    
+    atr = calculate_atr(df, period)
+    hl2 = (high + low) / 2
+    upper_band = hl2 + (multiplier * atr)
+    lower_band = hl2 - (multiplier * atr)
+    
+    supertrend = pd.Series(index=df.index, dtype=float)
+    direction = pd.Series(index=df.index, dtype=int)  # 1 = UP, -1 = DOWN
+    
+    for i in range(1, len(df)):
+        if pd.isna(close.iloc[i]) or pd.isna(upper_band.iloc[i]) or pd.isna(lower_band.iloc[i]):
+            direction.iloc[i] = direction.iloc[i-1] if i>1 else 1
+            continue
+            
+        if close.iloc[i] > upper_band.iloc[i-1]:
+            direction.iloc[i] = 1
+        elif close.iloc[i] < lower_band.iloc[i-1]:
+            direction.iloc[i] = -1
+        else:
+            direction.iloc[i] = direction.iloc[i-1]
+            if direction.iloc[i] == 1:
+                lower_band.iloc[i] = max(lower_band.iloc[i], lower_band.iloc[i-1])
+            else:
+                upper_band.iloc[i] = min(upper_band.iloc[i], upper_band.iloc[i-1])
+        
+        supertrend.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == 1 else upper_band.iloc[i]
+    
+    # Эхний утгуудыг бөглөх
+    direction.iloc[0] = 1
+    supertrend.iloc[0] = lower_band.iloc[0]
+    return supertrend, direction
+
+def calculate_vwap(df):
+    """VWAP (Volume Weighted Average Price)"""
+    typical_price = (df["high"] + df["low"] + df["close"]) / 3
+    vwap = (typical_price * df["volume"]).cumsum() / df["volume"].cumsum()
+    return vwap
+
+def get_funding_rate(symbol):
+    """Binance-ээс одоогийн funding rate авах"""
+    if not FUNDING_ENABLED:
+        return 0.0
+    try:
+        data = send_public_request("/fapi/v1/premiumIndex", {"symbol": symbol})
+        return safe_float(data.get("lastFundingRate", 0))
+    except Exception as e:
+        print(f"⚠️ Funding rate error {symbol}: {e}")
+        return 0.0
+
+def get_mtf_signal(symbol):
+    """Multi-Timeframe (4h, 1h) чиглэл тодорхойлох"""
+    if not MTF_ENABLED:
+        return "NEUTRAL"
+    try:
+        df_4h = get_klines(symbol, "4h", 50)
+        df_1h = get_klines(symbol, "1h", 50)
+        
+        if len(df_4h) < 20 or len(df_1h) < 20:
+            return "NEUTRAL"
+            
+        ema_4h = calculate_ema(df_4h, 50).iloc[-1]
+        close_4h = df_4h["close"].iloc[-1]
+        ema_1h = calculate_ema(df_1h, 50).iloc[-1]
+        close_1h = df_1h["close"].iloc[-1]
+        
+        trend_4h = "BUY" if close_4h > ema_4h else "SELL"
+        trend_1h = "BUY" if close_1h > ema_1h else "SELL"
+        
+        if trend_4h == "BUY" and trend_1h == "BUY": return "BULLISH"
+        if trend_4h == "SELL" and trend_1h == "SELL": return "BEARISH"
+        return "NEUTRAL"
+    except Exception as e:
+        print(f"⚠️ MTF error {symbol}: {e}")
+        return "NEUTRAL"
+
+
+# ==========================================================
+# 📊 INDICATORS (Хуучин үзүүлэлтүүд - EMA, RSI, MACD, ATR, ADX, Bollinger)
 # ==========================================================
 
 def calculate_ema(df, period):
@@ -536,6 +646,7 @@ def calculate_atr(df, period=14):
     return tr.ewm(alpha=1/period, adjust=False).mean()
 
 def calculate_adx(df, period=14):
+    # ADX-г хэвээр үлдээсэн (бусад стратегид хэрэгтэй)
     high = df["high"]
     low = df["low"]
     close = df["close"]
@@ -576,26 +687,44 @@ def calculate_volume_ratio(df, period=20):
 
 
 # ==========================================================
-# 🧠 REGIME
+# 🧠 REGIME (Шинэчлэгдсэн: CHOP ашиглав)
 # ==========================================================
 
-def determine_regime(adx, ema_slope, atr_pct):
-    if adx >= 30 and abs(ema_slope) >= 0.5:
-        return "STRONG_TREND"
-    if adx >= 25:
+def determine_regime(chop, adx, ema_slope, atr_pct):
+    """
+    CHOP-д суурилсан зах зээлийн төлөв тодорхойлох.
+    CHOP < 38.2 -> Trend, CHOP > 61.8 -> Range
+    """
+    if pd.isna(chop):
+        # Fallback to ADX if CHOP is NaN
+        if adx >= 30 and abs(ema_slope) >= 0.5:
+            return "STRONG_TREND"
+        if adx >= 25:
+            return "TRENDING"
+        if adx <= 18 and atr_pct >= 0.5:
+            return "VOLATILE_RANGE"
+        if adx <= 18:
+            return "RANGE"
+        return "TRANSITION"
+    
+    # CHOP-based logic
+    if chop < 38.2:  # Trending
+        if abs(ema_slope) >= 1.0:
+            return "STRONG_TREND"
         return "TRENDING"
-    if adx <= 18:
+    elif chop > 61.8:  # Ranging
         if atr_pct >= 0.5:
             return "VOLATILE_RANGE"
         return "RANGE"
-    return "TRANSITION"
+    else:  # 38.2 - 61.8
+        return "TRANSITION"
 
 
 # ==========================================================
-# 🎯 SIGNAL GENERATION
+# 🎯 SIGNAL GENERATION (Шинэчлэгдсэн: SUPERTREND нэмэв)
 # ==========================================================
 
-def generate_strategy_signal(strategy, df, sentiment, regime):
+def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
     close = df["close"].iloc[-1]
     ema20 = calculate_ema(df, 20)
     ema50 = calculate_ema(df, 50)
@@ -606,12 +735,24 @@ def generate_strategy_signal(strategy, df, sentiment, regime):
     upper, middle, lower = calculate_bollinger(df)
     adx = calculate_adx(df).iloc[-1]
     ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
+    
+    # VWAP (Mean Reversion-д зориулж)
+    vwap = calculate_vwap(df).iloc[-1] if VWAP_ENABLED else close
 
-    if strategy == "EMA_CROSSOVER":
-        bullish = (ema20.iloc[-1] > ema50.iloc[-1] and ema20.iloc[-2] <= ema50.iloc[-2])
-        bearish = (ema20.iloc[-1] < ema50.iloc[-1] and ema20.iloc[-2] >= ema50.iloc[-2])
-        if bullish and sentiment >= -0.4: return "BUY"
-        if bearish and sentiment <= 0.4: return "SELL"
+    if strategy == "SUPERTREND":
+        # Хуучин EMA_CROSSOVER-г орлох
+        st, direction = calculate_supertrend(df, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+        if len(direction) < 2:
+            return "HOLD"
+        # BUY дохио: -1 -> 1 болсон үед (эсвэл 1 хэвээр байвал)
+        if direction.iloc[-1] == 1 and direction.iloc[-2] == -1:
+            if sentiment >= -0.4 and regime in ["TRENDING", "STRONG_TREND"]:
+                return "BUY"
+        if direction.iloc[-1] == -1 and direction.iloc[-2] == 1:
+            if sentiment <= 0.4 and regime in ["TRENDING", "STRONG_TREND"]:
+                return "SELL"
+        # Хэрэв аль хэдийн чиглэлдээ байгаа бол HOLD
+        return "HOLD"
 
     elif strategy == "MACD_MOMENTUM":
         if histogram.iloc[-1] > 0 and histogram.iloc[-1] > histogram.iloc[-2] and rsi < 70: return "BUY"
@@ -622,8 +763,14 @@ def generate_strategy_signal(strategy, df, sentiment, regime):
         if regime in ["RANGE", "VOLATILE_RANGE"] and close >= upper.iloc[-1] and rsi > 60: return "SELL"
 
     elif strategy == "BOLLINGER_MEAN_REVERSION":
-        if regime in ["RANGE", "VOLATILE_RANGE"] and close < lower.iloc[-1] and rsi < 35: return "BUY"
-        if regime in ["RANGE", "VOLATILE_RANGE"] and close > upper.iloc[-1] and rsi > 65: return "SELL"
+        # VWAP-тай хослуулах
+        if regime in ["RANGE", "VOLATILE_RANGE"]:
+            vwap_deviation = (close - vwap) / vwap * 100
+            if close < lower.iloc[-1] and rsi < 35 and vwap_deviation < -1.0:
+                return "BUY"
+            if close > upper.iloc[-1] and rsi > 65 and vwap_deviation > 1.0:
+                return "SELL"
+        return "HOLD"
 
     elif strategy == "RSI_STRATEGY":
         if rsi < 30 and sentiment > -0.6: return "BUY"
@@ -638,26 +785,41 @@ def generate_strategy_signal(strategy, df, sentiment, regime):
 
 
 # ==========================================================
-# 📊 SCORE
+# 📊 SCORE (Шинэчлэгдсэн: CHOP болон MTF нөлөөлнө)
 # ==========================================================
 
-def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slope, sentiment, regime):
+def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slope, sentiment, regime, chop, mtf_signal):
     score = 0.0
-    if strategy == "EMA_CROSSOVER":
-        if regime in ["TRENDING", "STRONG_TREND"]: score += 7
-        score += min(adx, 40) * 0.35 + abs(ema_slope) * 2 + min(volume_ratio, 3) * 1.5 + sentiment * 2
+    
+    # MTF шүүлтүүр: Хэрэв BULLISH биш бол Trend стратегиудын оноог бууруулах
+    mtf_penalty = 0
+    if mtf_signal == "NEUTRAL":
+        mtf_penalty = -5  # Тодорхойгүй бол оноог хасах
+    
+    # CHOP-д суурилсан Regime оноо
+    chop_score = 0
+    if regime in ["STRONG_TREND", "TRENDING"]:
+        chop_score = 5
+    elif regime in ["RANGE", "VOLATILE_RANGE"]:
+        chop_score = 3
+    
+    if strategy == "SUPERTREND":
+        if regime in ["TRENDING", "STRONG_TREND"]: score += 8
+        score += min(adx, 50) * 0.3 + abs(ema_slope) * 2 + min(volume_ratio, 3) + sentiment * 2
+        score += mtf_penalty
 
     elif strategy == "MACD_MOMENTUM":
         if regime in ["TRENDING", "TRANSITION"]: score += 5
         score += max(0, 35 - abs(rsi - 50)) * 0.15 + min(adx, 35) * 0.25 + min(atr_pct, 5) * 2 + min(volume_ratio, 3)
+        score += mtf_penalty * 0.5
 
     elif strategy == "GRID_TRADING":
         if regime in ["RANGE", "VOLATILE_RANGE"]: score += 8
-        score += max(0, 20 - adx) * 0.4 + atr_pct * 3
+        score += max(0, 25 - adx) * 0.4 + atr_pct * 3 + chop_score
 
     elif strategy == "BOLLINGER_MEAN_REVERSION":
         if regime in ["RANGE", "VOLATILE_RANGE"]: score += 7
-        score += max(0, 20 - adx) * 0.35 + abs(rsi - 50) * 0.15 + atr_pct * 2
+        score += max(0, 25 - adx) * 0.35 + abs(rsi - 50) * 0.15 + atr_pct * 2 + chop_score
 
     elif strategy == "RSI_STRATEGY":
         if rsi <= 35 or rsi >= 65: score += 8
@@ -667,6 +829,7 @@ def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slop
         if regime == "STRONG_TREND": score += 10
         elif regime == "TRENDING": score += 7
         score += min(adx, 50) * 0.35 + abs(ema_slope) * 3 + min(volume_ratio, 3) + sentiment * 2
+        score += mtf_penalty
 
     return max(0, score)
 
@@ -712,7 +875,7 @@ def check_min_notional(symbol, price, quantity):
 
 
 # ==========================================================
-# 🔍 ANALYZE COIN
+# 🔍 ANALYZE COIN (Шинэчлэгдсэн: MTF, Funding, CHOP, VWAP нэмэгдсэн)
 # ==========================================================
 
 def analyze_coin(symbol, check_correlation=True, active_symbols=None):
@@ -721,6 +884,13 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         if len(df) < 100:
             return None
 
+        # 1. MTF шүүлтүүр
+        mtf_signal = get_mtf_signal(symbol)
+        if MTF_ENABLED and mtf_signal == "NEUTRAL":
+            print(f"⏸️ SKIPPED {symbol}: MTF Neutral (4h/1h conflict)")
+            return None
+
+        # 2. Корреляци шалгах
         if CORRELATION_ENABLED and check_correlation and active_symbols:
             for sym in active_symbols:
                 if sym == symbol:
@@ -740,21 +910,40 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         ema200 = calculate_ema(df, 200)
         ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
         volume_ratio = calculate_volume_ratio(df)
+        
+        # 3. Шинэ үзүүлэлтүүд
+        chop = calculate_chop(df, CHOP_PERIOD).iloc[-1]
+        vwap = calculate_vwap(df).iloc[-1]
+        funding_rate = get_funding_rate(symbol)
+        
+        # 4. Sentiment (Funding Rate нөлөө)
         sentiment = 0.0
-        regime = determine_regime(adx, ema_slope, atr_pct)
+        if funding_rate > 0.01:
+            sentiment -= 0.5  # Хэт их LONG -> Bearish
+        elif funding_rate < -0.01:
+            sentiment += 0.5  # Хэт их SHORT -> Bullish
+        
+        # 5. Regime (CHOP-ээр тодорхойлох)
+        regime = determine_regime(chop, adx, ema_slope, atr_pct)
 
         strategy_results = {}
         for strategy in STRATEGY_NAMES:
             if not strategy_stats[strategy]["active"]:
                 continue
-            score = calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slope, sentiment, regime)
-            signal = generate_strategy_signal(strategy, df, sentiment, regime)
+            score = calculate_strategy_score(
+                strategy, adx, rsi, atr_pct, volume_ratio, 
+                ema_slope, sentiment, regime, chop, mtf_signal
+            )
+            signal = generate_strategy_signal(strategy, df, sentiment, regime, chop)
+            
+            # Нэмэлт шүүлтүүрүүд
             if signal == "BUY" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] < ema50.iloc[-1]:
                 signal = "HOLD"
             if signal == "SELL" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] > ema50.iloc[-1]:
                 signal = "HOLD"
             if score < MIN_SIGNAL_SCORE:
                 signal = "HOLD"
+                
             strategy_results[strategy] = {
                 "strategy": strategy,
                 "symbol": symbol,
@@ -767,7 +956,11 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
                 "volume_ratio": volume_ratio,
                 "ema_slope": ema_slope,
                 "regime": regime,
-                "sentiment": sentiment
+                "sentiment": sentiment,
+                "chop": chop,
+                "vwap": vwap,
+                "funding": funding_rate,
+                "mtf": mtf_signal
             }
         return {
             "symbol": symbol,
@@ -778,6 +971,10 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
             "volume_ratio": volume_ratio,
             "ema_slope": ema_slope,
             "regime": regime,
+            "chop": chop,
+            "vwap": vwap,
+            "funding": funding_rate,
+            "mtf": mtf_signal,
             "strategies": strategy_results
         }
     except Exception as e:
@@ -901,7 +1098,8 @@ def send_selection_report(selected, all_candidates=None, skipped_reasons=None):
             msg += f"Дохио / Signal: {coin['signal']}\n"
             msg += f"Оноо / Score: {coin['score']:.2f}\n"
             msg += f"ADX / RSI: {coin['adx']:.1f} / {coin['rsi']:.1f}\n"
-            msg += f"Зах зээлийн төлөв / Regime: {coin['regime']}\n"
+            msg += f"Regime: {coin['regime']} | CHOP: {coin.get('chop', 50):.1f}\n"
+            msg += f"MTF: {coin.get('mtf', 'NEUTRAL')} | Funding: {coin.get('funding', 0)*100:.3f}%\n"
             msg += "─────────────────\n"
     else:
         msg += "⚠️ SIGNAL ОЛДСОНГҮЙ\n━━━━━━━━━━━━━━━━━\n"
@@ -950,8 +1148,10 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
             ema_slope = ((ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100) if ema50.iloc[-5] else 0.0
             volume_ratio = calculate_volume_ratio(window)
             sentiment = 0.0
-            regime = determine_regime(adx, ema_slope, atr_pct)
-            signal = generate_strategy_signal(strategy, window, sentiment, regime)
+            # Backtest-д CHOP ашиглах
+            chop = calculate_chop(window, CHOP_PERIOD).iloc[-1]
+            regime = determine_regime(chop, adx, ema_slope, atr_pct)
+            signal = generate_strategy_signal(strategy, window, sentiment, regime, chop)
 
             next_open = float(df["open"].iloc[i + 1])
             fee = BACKTEST_FEE_RATE
@@ -1951,7 +2151,7 @@ def main():
     global session_start_balance, cycle_start_balance, last_cycle_balance, cycle_start_time, safety_lock, session_peak_balance, drawdown_halt
 
     print("=" * 70)
-    print("🤖 SMART BOT V2 (DCA + Correlation)")
+    print("🤖 SMART BOT V2 (SUPERTREND + CHOP + MTF + VWAP + FUNDING)")
     print("🎯 UNREALIZED $300 → REALIZED")
     print("😴 10 MIN COOLDOWN")
     print("🔄 AUTO RESUME")
@@ -1992,18 +2192,17 @@ def main():
 
     send_telegram(
         format_block(
-            "SMART BOT V2 АСЛАА! (DCA + Correlation)",
+            "SMART BOT V2 АСЛАА! (ШИНЭ ҮЗҮҮЛЭЛТҮҮД)",
             "🤖",
             [
-                ("Strategies × Coins", f"6 × {len(SYMBOLS_POOL)}"),
+                ("Strategies", "6 (SUPERTREND, MACD, GRID, BOLLINGER, RSI, TREND)"),
+                ("Regime", "CHOP Index (38.2/61.8)"),
+                ("Trend Signal", "Supertrend (EMA-г орлосон)"),
+                ("Filters", "MTF (4h/1h) + VWAP + Funding Rate"),
                 ("Leverage", f"{LEVERAGE}x"),
                 ("Allocation", f"{TRADE_ALLOCATION * 100:.0f}%"),
-                ("Trailing", f"{TRAILING_CALLBACK_RATE}%"),
-                ("Take Profit", f"{TAKE_PROFIT_PCT}%"),
-                ("Target (unrealized)", f"${TARGET_PROFIT:.2f}"),
-                ("DCA", f"{DCA_LEVELS} levels, {DCA_TRIGGER_PCT}% trigger"),
-                ("Correlation", f"{CORRELATION_THRESHOLD} threshold"),
-                ("Max Drawdown", f"{MAX_SESSION_DRAWDOWN_PCT:.1f}% (peak balance-аас)" if MAX_SESSION_DRAWDOWN_PCT else "OFF"),
+                ("Target", f"${TARGET_PROFIT:.2f}"),
+                ("Max Drawdown", f"{MAX_SESSION_DRAWDOWN_PCT:.1f}%" if MAX_SESSION_DRAWDOWN_PCT else "OFF"),
                 ("", ""),
                 ("Target хүрэхэд", "TP/SL цуцлаад бүх позиц хаана"),
                 ("Дараа нь", "10 мин cooldown → автомат үргэлжлэл"),
