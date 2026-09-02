@@ -180,7 +180,7 @@ def current_timestamp_ms():
 
 
 # ==========================================================
-# 📱 TELEGRAM
+# 📱 TELEGRAM (parse_mode БҮРМӨСӨН ХАСАВ)
 # ==========================================================
 
 def send_telegram(text, pin=False):
@@ -191,27 +191,11 @@ def send_telegram(text, pin=False):
         payload = {
             "chat_id": CHAT_ID,
             "text": text,
-            "parse_mode": "Markdown"
+            # parse_mode-г бүрмөсөн хасав
         }
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code != 200:
             print("❌ Telegram error:", response.text)
-            try:
-                err = response.json()
-            except Exception:
-                err = {}
-            if response.status_code == 400 and "can't parse entities" in str(err.get("description", "")):
-                fallback_payload = {"chat_id": CHAT_ID, "text": text}
-                retry = requests.post(url, json=fallback_payload, timeout=10)
-                if retry.status_code != 200:
-                    print("❌ Telegram fallback error:", retry.text)
-                    return False
-                result = retry.json()
-                if pin and result.get("ok"):
-                    message_id = result["result"]["message_id"]
-                    pin_url = f"{TELEGRAM_API_ROOT}/bot{BOT_TOKEN}/pinChatMessage"
-                    requests.post(pin_url, json={"chat_id": CHAT_ID, "message_id": message_id}, timeout=10)
-                return True
             return False
         result = response.json()
         if pin and result.get("ok"):
@@ -802,7 +786,7 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
 
 
 # ==========================================================
-# 🏆 SCREENING (Шинэчлэгдсэн - арилжаа хийгдээгүй шалтгаан цуглуулдаг)
+# 🏆 SCREENING
 # ==========================================================
 
 def screen_coins():
@@ -810,7 +794,7 @@ def screen_coins():
     print(f"🔍 MARKET SCREENING {datetime.now().strftime('%H:%M:%S')}")
     print("=" * 70)
 
-    skipped_reasons = []  # Шинэ: сонгогдоогүй шалтгаануудыг цуглуулах
+    skipped_reasons = []
 
     current_positions = get_positions()
     active_symbols = {p["symbol"] for p in current_positions}
@@ -872,7 +856,6 @@ def screen_coins():
     else:
         selected = unique_candidates[:MAX_SELECTIONS]
 
-    # --- ШИНЭ: Маржин хязгаар шалгах ---
     total_balance = get_usdt_balance()
     positions = get_positions()
     current_margin_used = 0.0
@@ -883,42 +866,33 @@ def screen_coins():
     if current_margin_used >= max_margin * 0.95:
         skipped_reasons.append(f"💳 Маржин хязгаарт хүрсэн (ашигласан: {current_margin_used:.2f} / хязгаар: {max_margin:.2f} USDT)")
 
-    # --- ШИНЭ: Идэвхгүй стратегиуд ---
     inactive_strategies = [s for s, stats in strategy_stats.items() if not stats["active"]]
     if inactive_strategies:
         skipped_reasons.append(f"⏸️ Идэвхгүй стратеги: {', '.join(inactive_strategies)}")
 
-    # --- ШИНЭ: Бага оноотой дохионууд ---
     low_score_signals = []
     for coin in analyses:
         for strategy, result in coin["strategies"].items():
             if result["signal"] in ["BUY", "SELL"] and result["score"] < MIN_SIGNAL_SCORE:
                 low_score_signals.append(f"{result['symbol']} ({strategy}): {result['score']:.1f}")
     if low_score_signals:
-        # Зөвхөн эхний 5-ыг харуулна
         skipped_reasons.append(f"📉 Оноо хэт бага (MIN_SIGNAL_SCORE={MIN_SIGNAL_SCORE}): {', '.join(low_score_signals[:5])}")
 
     print("\n🏆 FINAL SELECTION:")
     for i, coin in enumerate(selected, 1):
         print(f"{i}. {coin['symbol']} | {coin['strategy']} | {coin['signal']} | Score={coin['score']:.2f}")
 
-    # --- ШИНЭ: send_selection_report-д нэмэлт мэдээлэл дамжуулах ---
     send_selection_report(selected, strategy_candidates, skipped_reasons)
-
     return selected
 
 
 # ==========================================================
-# 📱 SELECTION REPORT (Шинэчлэгдсэн - шалтгаануудыг харуулдаг)
+# 📱 SELECTION REPORT
 # ==========================================================
 
 def send_selection_report(selected, all_candidates=None, skipped_reasons=None):
-    """
-    Сонгогдсон дохио + Сонгогдоогүй шалтгаануудыг Telegram-д илгээх
-    """
     msg = ""
 
-    # 1. Сонгогдсон дохионууд
     if selected:
         msg += "🏆 ШИНЭ TOP SIGNALS\n━━━━━━━━━━━━━━━━━\n"
         for i, coin in enumerate(selected, 1):
@@ -932,14 +906,12 @@ def send_selection_report(selected, all_candidates=None, skipped_reasons=None):
     else:
         msg += "⚠️ SIGNAL ОЛДСОНГҮЙ\n━━━━━━━━━━━━━━━━━\n"
 
-    # 2. Сонгогдоогүй шалтгаанууд
     if skipped_reasons:
         msg += "\n\n📋 АРИЛЖАА НЭЭГДЭЭГҮЙ ШАЛТГААНУУД / WHY TRADES NOT OPENED:\n"
         msg += "━━━━━━━━━━━━━━━━━\n"
         for reason in skipped_reasons:
             msg += f"• {reason}\n"
 
-    # 3. Бүх стратегийн шилдэг дохионууд
     if all_candidates:
         msg += "\n\n📊 БҮХ СТРАТЕГИЙН ШИЛДЭГ ДОХИОНУУД / TOP SIGNALS PER STRATEGY:\n"
         msg += "━━━━━━━━━━━━━━━━━\n"
@@ -1045,23 +1017,24 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
         avg_win = float(wins.mean()) if len(wins) else 0.0
         avg_loss = float(losses.mean()) if len(losses) else 0.0
 
-        return (
-            f"🧪 BACKTEST REPORT\n"
-            f"Symbol: {symbol}\n"
-            f"Strategy: {strategy}\n"
-            f"Period: сүүлийн {days} өдөр ({interval})\n"
-            f"Trades: {len(trades)}\n"
-            f"Win Rate: {win_rate:.1f}%\n"
-            f"Net PnL: {net.sum():+.2f}%\n"
-            f"Avg Win: {avg_win:+.2f}%\n"
-            f"Avg Loss: {avg_loss:+.2f}%\n"
-            f"Profit Factor: {profit_factor:.2f}\n"
-            f"Expectancy/Trade: {expectancy:+.3f}%\n"
-            f"Max Drawdown: {max_dd:.2f}%\n"
-            f"Fee model: {BACKTEST_FEE_RATE * 100:.03f}%/side\n"
-            f"Slippage model: {BACKTEST_SLIPPAGE_RATE * 100:.03f}%/side\n"
-            f"Note: энэ нь simulation; funding, liquidation болон exact exchange fills бүрэн моделдоогүй."
-        )
+        rows = [
+            ("Symbol", symbol),
+            ("Strategy", strategy),
+            ("Period", f"сүүлийн {days} өдөр ({interval})"),
+            ("Trades", str(len(trades))),
+            ("Win Rate", f"{win_rate:.1f}%"),
+            ("Net PnL", f"{net.sum():+.2f}%"),
+            ("Avg Win", f"{avg_win:+.2f}%"),
+            ("Avg Loss", f"{avg_loss:+.2f}%"),
+            ("Profit Factor", f"{profit_factor:.2f}"),
+            ("Expectancy/Trade", f"{expectancy:+.3f}%"),
+            ("Max Drawdown", f"{max_dd:.2f}%"),
+            ("Fee model", f"{BACKTEST_FEE_RATE * 100:.03f}%/side"),
+            ("Slippage model", f"{BACKTEST_SLIPPAGE_RATE * 100:.03f}%/side"),
+            ("Note", "энэ нь simulation; funding, liquidation болон exact exchange fills бүрэн моделдоогүй."),
+        ]
+        return format_block("🧪 BACKTEST REPORT", "🧪", rows)
+
     except Exception as e:
         return f"❌ Backtest error ({symbol}, {strategy}): {e}"
 
@@ -2055,7 +2028,6 @@ def main():
 
     try:
         selected = screen_coins()
-        send_selection_report(selected, None, None)  # Эхний удаагийн дуудалтад зориулж None дамжуулсан
         execute_trades(selected, get_usdt_balance())
     except Exception as e:
         error = traceback.format_exc()
@@ -2120,7 +2092,6 @@ def main():
 
                     try:
                         selected = screen_coins()
-                        send_selection_report(selected, None, None)
                         execute_trades(selected, get_usdt_balance())
                     except Exception as e:
                         print(f"❌ Auto-resume screening error: {e}")
@@ -2150,11 +2121,10 @@ def main():
 
                 try:
                     selected = screen_coins()
-                    send_selection_report(selected, None, None)
                 except Exception as e:
                     print(f"❌ Screening: {e}")
                     selected = []
-                    send_selection_report([], None, ["Скрининг хийхэд алдаа гарлаа"])
+                    send_telegram("⚠️ Скрининг хийхэд алдаа гарлаа. Дараагийн циклд дахин оролдоно.")
 
                 try:
                     execute_trades(selected, get_usdt_balance())
