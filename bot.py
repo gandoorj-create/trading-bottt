@@ -93,6 +93,9 @@ session_realized_pnl = 0.0
 cycle_start_balance = 0.0
 cycle_start_time = time.time()
 last_cycle_balance = 0.0
+session_peak_balance = 0.0   # Max drawdown circuit breaker-т ашиглана (high-water mark)
+drawdown_lock_active = False  # Drawdown-оос болж safety_lock идэвхжсэн эсэх (давхар мэдэгдэл илгээхээс сэргийлнэ)
+drawdown_halt = False         # True бол бот бүрмөсөн зогсоно — гараар restart хийтэл автоматаар үргэлжлэхгүй
 
 
 # ==========================================================
@@ -1723,6 +1726,57 @@ def target_cooldown():
 
 
 # ==========================================================
+# 🚨 MAX DRAWDOWN CIRCUIT BREAKER
+# ==========================================================
+
+def check_drawdown_circuit_breaker():
+    """Session-ий хамгийн өндөр (peak) балансаас тооцсон drawdown хэмжих.
+    Threshold-д хүрвэл safety_lock идэвхжиж, бүх позиц хаагдана.
+    Энэ нь нэг арилжааны SL-ээс ялгаатай: НИЙТ портфелийн эрсдэлийг хязгаарладаг.
+    Идэвхэжсэний дараа бот АВТОМАТААР дахин trading эхлэхгүй — drawdown_halt
+    флаг нь гараар restart хийтэл бүрмөсөн зогсоохыг шаарддаг (жирийн
+    safety_lock-той адилгүй, энэ нь "сэргэдэггүй")."""
+    global safety_lock, session_peak_balance, drawdown_lock_active, drawdown_halt
+
+    if not MAX_SESSION_DRAWDOWN_PCT or MAX_SESSION_DRAWDOWN_PCT <= 0:
+        return  # Тохиргоогоор унтраасан (0 буюу тохируулаагүй)
+
+    balance = get_usdt_balance()
+    if balance <= 0:
+        return  # Balance татаж чадаагүй үед андуу trigger хийхгүй
+
+    if balance > session_peak_balance:
+        session_peak_balance = balance
+        if drawdown_lock_active:
+            drawdown_lock_active = False  # Балансаа нөхөж, шинэ peak тогтоов
+        return
+
+    if session_peak_balance <= 0:
+        return
+
+    drawdown_pct = (session_peak_balance - balance) / session_peak_balance * 100
+    if drawdown_pct >= MAX_SESSION_DRAWDOWN_PCT and not safety_lock:
+        safety_lock = True
+        drawdown_lock_active = True
+        drawdown_halt = True
+        print(f"🚨 MAX DRAWDOWN HIT: {drawdown_pct:.2f}% (limit {MAX_SESSION_DRAWDOWN_PCT}%) — HARD STOP")
+        send_telegram(
+            format_block(
+                "MAX DRAWDOWN CIRCUIT BREAKER",
+                "🚨",
+                [
+                    ("Peak Balance", f"${session_peak_balance:,.2f}"),
+                    ("Current Balance", f"${balance:,.2f}"),
+                    ("Drawdown", f"{drawdown_pct:.2f}% (limit {MAX_SESSION_DRAWDOWN_PCT:.1f}%)"),
+                    ("", ""),
+                    ("Статус", "БОТ БҮРМӨСӨН ЗОГСЛОО"),
+                    ("Дараагийн алхам", "Бүх позиц хаагдана. Гараар restart хийтэл автоматаар үргэлжлэхгүй"),
+                ]
+            )
+        )
+
+
+# ==========================================================
 # 📡 MONITOR (DCA дуудах хэсэг нэмэгдсэн)
 # ==========================================================
 
@@ -1916,7 +1970,7 @@ def safety_recovery():
 # ==========================================================
 
 def main():
-    global session_start_balance, cycle_start_balance, last_cycle_balance, cycle_start_time, safety_lock
+    global session_start_balance, cycle_start_balance, last_cycle_balance, cycle_start_time, safety_lock, session_peak_balance, drawdown_halt
 
     print("=" * 70)
     print("🤖 SMART BOT V2 (DCA + Correlation)")
@@ -1951,10 +2005,12 @@ def main():
         session_start_balance = get_usdt_balance()
         cycle_start_balance = session_start_balance
         last_cycle_balance = session_start_balance
+        session_peak_balance = session_start_balance
     except Exception:
         session_start_balance = 0.0
         cycle_start_balance = 0.0
         last_cycle_balance = 0.0
+        session_peak_balance = 0.0
     cycle_start_time = time.time()
 
     send_telegram(
@@ -1970,6 +2026,7 @@ def main():
                 ("Target (unrealized)", f"${TARGET_PROFIT:.2f}"),
                 ("DCA", f"{DCA_LEVELS} levels, {DCA_TRIGGER_PCT}% trigger"),
                 ("Correlation", f"{CORRELATION_THRESHOLD} threshold"),
+                ("Max Drawdown", f"{MAX_SESSION_DRAWDOWN_PCT:.1f}% (peak balance-аас)" if MAX_SESSION_DRAWDOWN_PCT else "OFF"),
                 ("", ""),
                 ("Target хүрэхэд", "TP/SL цуцлаад бүх позиц хаана"),
                 ("Дараа нь", "10 мин cooldown → автомат үргэлжлэл"),
@@ -2009,8 +2066,31 @@ def main():
         try:
             current_time = time.time()
 
+            if drawdown_halt:
+                # MAX DRAWDOWN эвдэрсэн: бот бүрмөсөн зогссон төлөвт байна.
+                # Позиц үлдсэн бол хааж, эс бөгөөс зүгээр idle хэвээр байна —
+                # ямар ч тохиолдолд шинэ trade нээхгүй, автоматаар "сэргэхгүй".
+                try:
+                    remaining = get_positions()
+                    if remaining:
+                        close_all_positions_and_verify()
+                except Exception as e:
+                    print(f"❌ Drawdown halt cleanup: {e}")
+                time.sleep(MONITOR_INTERVAL_SEC)
+                continue
+
             if safety_lock:
                 safety_recovery()
+                time.sleep(MONITOR_INTERVAL_SEC)
+                continue
+
+            try:
+                check_drawdown_circuit_breaker()
+            except Exception as e:
+                print(f"❌ Drawdown check: {e}")
+            if safety_lock:
+                # Drawdown circuit breaker дөнгөж идэвхжсэн бол дараагийн давталтаас
+                # эхлээд safety_recovery-д зохицуулуулна (position хаах гэх мэт)
                 time.sleep(MONITOR_INTERVAL_SEC)
                 continue
 
