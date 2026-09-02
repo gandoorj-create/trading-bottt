@@ -35,7 +35,7 @@
   "correlation_enabled": true,
   "correlation_threshold": 0.65,
   "correlation_lookback": 50,
-  "backtest_enabled": false,
+  "backtest_enabled": true,
   "backtest_days": 30,
   "backtest_interval": "1h"
 }
