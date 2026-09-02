@@ -313,7 +313,9 @@ def decimals_from_step(step):
 def round_quantity(symbol, quantity):
     info = get_symbol_info(symbol)
     if not info:
-        return round(quantity, 3)
+        # Тодорхойгүй нарийвчлалыг таамаглахгүй — арилжаа хийхгүй байх нь илүү аюулгүй
+        print(f"⚠️ {symbol}: no exchange info found (delisted/renamed?) — skipping")
+        return None
     step = info.get("stepSize")
     if not step or step <= 0:
         return round(quantity, int(info.get("quantityPrecision", 3)))
@@ -323,7 +325,8 @@ def round_quantity(symbol, quantity):
 def round_price(symbol, price):
     info = get_symbol_info(symbol)
     if not info:
-        return round(price, 2)
+        print(f"⚠️ {symbol}: no exchange info found (delisted/renamed?) — skipping")
+        return None
     tick = info.get("tickSize")
     if not tick or tick <= 0:
         return round(price, int(info.get("pricePrecision", 2)))
@@ -1217,7 +1220,13 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
         tp_price = round_price(symbol, entry_price * (1 - TAKE_PROFIT_PCT / 100))
         emergency_sl_price = round_price(symbol, entry_price * (1 + EMERGENCY_SL_PCT / 100))
 
+    if tp_price is None or emergency_sl_price is None:
+        # Symbol info олдсонгүй — тодорхойгүй нарийвчлалаар order оруулахгүй
+        return False, None, None
+
     activation_price = calculate_trailing_activation(symbol, side, entry_price)
+    if activation_price is None:
+        return False, tp_price, None
 
     # Cancel stale conditional orders
     cancel_all_algo_orders(symbol)
@@ -1291,6 +1300,8 @@ def execute_trades(selected_coins, total_balance):
         notional = margin * LEVERAGE
         raw_quantity = notional / price
         quantity = round_quantity(symbol, raw_quantity)
+        if quantity is None:
+            continue
         info = get_symbol_info(symbol)
         if info and info.get("minQty"):
             min_qty = safe_float(info.get("minQty"))
@@ -1445,7 +1456,7 @@ def manage_dca():
 
         base_qty = safe_float(info.get("base_qty"))
         add_qty = round_quantity(symbol, base_qty * DCA_MULTIPLIER)
-        if add_qty <= 0:
+        if add_qty is None or add_qty <= 0:
             continue
 
         # Portfolio margin guard
@@ -1517,6 +1528,12 @@ def close_one_position(pos):
         return True
     close_side = "SELL" if amount > 0 else "BUY"
     quantity = round_quantity(symbol, abs(amount))
+    if quantity is None:
+        # Position хаах ажиллагааг ХЭЗЭЭ Ч алгасахгүй — эсхүл symbol info
+        # байхгүй байсан ч, Binance дээр аль хэдийн байгаа position хэмжээ
+        # хүчинтэй тул яг тэр хэмжээгээрээ хаана.
+        quantity = abs(amount)
+        print(f"⚠️ {symbol}: no exchange info — closing with raw position size {quantity}")
     position_side = pos.get("positionSide", "BOTH")
     print(f"🔒 CLOSE {symbol} | {close_side} | {quantity} | PositionSide={position_side}")
     result = place_market_order(symbol, close_side, quantity, reduce_only=True, position_side=position_side)
