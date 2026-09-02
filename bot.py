@@ -195,6 +195,24 @@ def send_telegram(text, pin=False):
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code != 200:
             print("❌ Telegram error:", response.text)
+            # Markdown entity parse алдаа гарвал (unescaped _, *, `, [ гэх мэт тэмдэгт)
+            # parse_mode-гүйгээр plain text-ээр дахин оролдоно — мессеж алга болохоос сэргийлнэ
+            try:
+                err = response.json()
+            except Exception:
+                err = {}
+            if response.status_code == 400 and "can't parse entities" in str(err.get("description", "")):
+                fallback_payload = {"chat_id": CHAT_ID, "text": text}
+                retry = requests.post(url, json=fallback_payload, timeout=10)
+                if retry.status_code != 200:
+                    print("❌ Telegram fallback error:", retry.text)
+                    return False
+                result = retry.json()
+                if pin and result.get("ok"):
+                    message_id = result["result"]["message_id"]
+                    pin_url = f"{TELEGRAM_API_ROOT}/bot{BOT_TOKEN}/pinChatMessage"
+                    requests.post(pin_url, json={"chat_id": CHAT_ID, "message_id": message_id}, timeout=10)
+                return True
             return False
         result = response.json()
         if pin and result.get("ok"):
@@ -1161,13 +1179,15 @@ def finalize_trade(symbol, trade_data):
 # ==========================================================
 
 def get_actual_leverage(symbol):
-    """Get the current leverage for a symbol (cached)."""
+    """Get the current leverage for a symbol (cached).
+    Binance Futures has NO GET /fapi/v1/leverage endpoint (POST only, for setting it).
+    Current leverage must be read from position risk info instead."""
     if symbol in leverage_cache:
         return leverage_cache[symbol]
-    result = send_signed_request("GET", "/fapi/v1/leverage", {"symbol": symbol})
-    if is_api_error(result):
+    result = send_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
+    if is_api_error(result) or not isinstance(result, list) or not result:
         return LEVERAGE
-    lev = int(result.get("leverage", LEVERAGE))
+    lev = int(safe_float(result[0].get("leverage", LEVERAGE), LEVERAGE))
     leverage_cache[symbol] = lev
     return lev
 
