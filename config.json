@@ -1,0 +1,50 @@
+{
+  "symbols_pool": [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "MATICUSDT", "LINKUSDT",
+    "DOTUSDT", "UNIUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT"
+  ],
+
+  "selection_interval_minutes": 360,
+  "monitor_interval_sec": 30,
+  "telegram_report_interval_sec": 300,
+  "max_selections": 6,
+
+  "trade_allocation": 0.15,
+  "leverage": 5,
+
+  "trailing_callback_rate": 0.5,
+  "trailing_activation_pct": 1.0,
+  "take_profit_pct": 3.0,
+  "emergency_sl_pct": 5.0,
+
+  "target_profit_usdt": 300.0,
+  "target_cooldown_sec": 600,
+
+  "close_verify_attempts": 12,
+  "close_verify_delay_sec": 2,
+
+  "min_signal_score": 10.0,
+  "min_balance_usdt": 10.0,
+  "max_total_margin_usage": 0.90,
+  "request_timeout": 15,
+  "pnl_lookback_limit": 100,
+
+  "adaptive_strategy": true,
+  "strategy_performance_tracking": true,
+  "consecutive_loss_limit": 3,
+  "strategy_cooldown_cycles": 2,
+
+  "dca_enabled": true,
+  "dca_levels": 2,
+  "dca_trigger_pct": 2.0,
+  "dca_multiplier": 1.0,
+
+  "correlation_enabled": true,
+  "correlation_threshold": 0.85,
+  "correlation_lookback": 50,
+
+  "backtest_enabled": false,
+  "backtest_days": 30,
+  "backtest_interval": "1h"
+}
