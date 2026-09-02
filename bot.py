@@ -19,11 +19,11 @@ from settings import *
 
 
 # ==========================================================
-# 📦 STATE PERSISTENCE
+# 📦 STATE PERSISTENCE (Шинэ)
 # ==========================================================
 STRATEGY_STATE_FILE = os.path.join(os.path.dirname(__file__), "strategy_state.json")
-BACKTEST_FEE_RATE = 0.0004
-BACKTEST_SLIPPAGE_RATE = 0.0005
+BACKTEST_FEE_RATE = 0.0004           # 0.04% taker fee (Binance futures)
+BACKTEST_SLIPPAGE_RATE = 0.0005      # 0.05% slippage
 
 # ==========================================================
 # 🧠 STRATEGY SETTINGS
@@ -53,6 +53,7 @@ strategy_stats = {
 
 
 def load_strategy_state():
+    """Persist adaptive strategy statistics across restarts."""
     global strategy_stats
     try:
         path = Path(STRATEGY_STATE_FILE)
@@ -74,6 +75,7 @@ def load_strategy_state():
 
 
 def save_strategy_state():
+    """Atomically save strategy statistics."""
     try:
         path = Path(STRATEGY_STATE_FILE)
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -104,7 +106,7 @@ active_trade_info = {}
 # 🧮 DCA STATE
 # ==========================================================
 
-dca_info = {}
+dca_info = {}  # {symbol: {"level": 0, "avg_price": entry_price, "base_qty": qty}}
 
 
 # ==========================================================
@@ -116,8 +118,8 @@ _symbol_info_cache = {}
 last_telegram_report_time = 0
 server_time_offset_ms = 0
 position_mode_cache = None
-safety_lock = False
-unprotected_symbols = set()
+safety_lock = False          # Глобал түгжээ (зөвхөн онцгой тохиолдолд)
+unprotected_symbols = set()  # Хамгаалалтгүй үлдсэн симболууд
 
 
 # ==========================================================
@@ -177,10 +179,10 @@ def current_timestamp_ms():
 
 
 # ==========================================================
-# 📱 TELEGRAM
+# 📱 TELEGRAM (parse_mode нэмсэн)
 # ==========================================================
 
-def send_telegram(text, pin=False, parse_mode=None):
+def send_telegram(text, pin=False):
     if not BOT_TOKEN or not CHAT_ID:
         return False
     try:
@@ -188,9 +190,8 @@ def send_telegram(text, pin=False, parse_mode=None):
         payload = {
             "chat_id": CHAT_ID,
             "text": text,
+            "parse_mode": "Markdown"   # <-- ЗАССАН
         }
-        if parse_mode is not None:
-            payload["parse_mode"] = parse_mode
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code != 200:
             print("❌ Telegram error:", response.text)
@@ -312,8 +313,9 @@ def decimals_from_step(step):
 def round_quantity(symbol, quantity):
     info = get_symbol_info(symbol)
     if not info:
-        print(f"⚠️ {symbol}: no exchange info found — skipping rounding")
-        return quantity
+        # Тодорхойгүй нарийвчлалыг таамаглахгүй — арилжаа хийхгүй байх нь илүү аюулгүй
+        print(f"⚠️ {symbol}: no exchange info found (delisted/renamed?) — skipping")
+        return None
     step = info.get("stepSize")
     if not step or step <= 0:
         return round(quantity, int(info.get("quantityPrecision", 3)))
@@ -323,7 +325,8 @@ def round_quantity(symbol, quantity):
 def round_price(symbol, price):
     info = get_symbol_info(symbol)
     if not info:
-        return price
+        print(f"⚠️ {symbol}: no exchange info found (delisted/renamed?) — skipping")
+        return None
     tick = info.get("tickSize")
     if not tick or tick <= 0:
         return round(price, int(info.get("pricePrecision", 2)))
@@ -385,7 +388,7 @@ def get_total_unrealized():
 
 
 # ==========================================================
-# 🛒 MARKET ORDER
+# 🛒 ORDER FUNCTIONS (clientOrderId нэмсэн)
 # ==========================================================
 
 def place_market_order(symbol, side, quantity, reduce_only=False, position_side=None, client_order_id=None):
@@ -408,21 +411,15 @@ def place_market_order(symbol, side, quantity, reduce_only=False, position_side=
             params["reduceOnly"] = "true"
     return send_signed_request("POST", "/fapi/v1/order", params)
 
-
-# ==========================================================
-# 🛡️ ALGO ORDERS (STOP / TAKE PROFIT / TRAILING) - ЗӨВ
-# ==========================================================
-
 def place_algo_order(params):
-    """Futures algo order байршуулах (STOP, TAKE_PROFIT, TRAILING_STOP)"""
+    # Binance USDS-M Futures-д тусдаа "algo order" endpoint байхгүй.
+    # STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET бүгд
+    # ердийн /fapi/v1/order endpoint-оор явна.
     params = params.copy()
-    # ЗААВАЛ: algoType параметр заавал байх ёстой
-    params["algoType"] = "CONDITIONAL"
-    # hedge_mode-д тохируулах
     hedge_mode = get_position_mode()
     if hedge_mode:
         params.pop("reduceOnly", None)
-    return send_signed_request("POST", "/fapi/v1/algoOrder", params)
+    return send_signed_request("POST", "/fapi/v1/order", params)
 
 def place_trailing_stop_order(symbol, side, quantity, callback_rate, activation_price=None, position_side=None):
     params = {
@@ -441,7 +438,7 @@ def place_trailing_stop_order(symbol, side, quantity, callback_rate, activation_
     else:
         params["reduceOnly"] = "true"
     if activation_price is not None:
-        params["activationPrice"] = str(activation_price)
+        params["activatePrice"] = str(activation_price)
     return place_algo_order(params)
 
 def place_stop_loss_order(symbol, side, quantity, stop_price, position_side=None):
@@ -480,48 +477,18 @@ def place_take_profit_order(symbol, side, quantity, tp_price, position_side=None
         params["reduceOnly"] = "true"
     return place_algo_order(params)
 
-
-# ==========================================================
-# 🧹 CANCEL ORDERS - ЗӨВ
-# ==========================================================
-
 def cancel_all_orders(symbol):
-    """Энгийн open orders-г цуцлах"""
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def cancel_all_algo_orders(symbol):
-    """
-    Algo orders-г цуцлах.
-    Binance Futures-д DELETE /fapi/v1/algoOrder нь 'algoId' эсвэл 'clientAlgoId' шаарддаг.
-    Бид бүх algo orders-г цуцлахын тулд эхлээд жагсаалтыг аваад тус бүрийг нь цуцлах хэрэгтэй.
-    """
-    try:
-        # Эхлээд бүх algo orders-г авах (GET /fapi/v1/algoOrders)
-        orders = send_signed_request("GET", "/fapi/v1/algoOrders", {"symbol": symbol})
-        if not isinstance(orders, list):
-            return {"status": "no_orders", "data": orders}
-        
-        results = []
-        for order in orders:
-            if order.get("symbol") != symbol:
-                continue
-            algo_id = order.get("algoId")
-            if algo_id:
-                # Тус бүрээр нь цуцлах
-                result = send_signed_request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
-                results.append(result)
-                time.sleep(0.1)
-        return {"status": "cancelled", "count": len(results), "results": results}
-    except Exception as e:
-        print(f"⚠️ Cancel algo orders error: {e}")
-        return {"status": "error", "error": str(e)}
+    # STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET захиалгууд ердийн
+    # order-той адил байрладаг тул тусдаа "algo" cancel endpoint байхгүй.
+    # /fapi/v1/allOpenOrders нь тэдгээрийг бас цуцална.
+    return cancel_all_orders(symbol)
 
 def cancel_all_symbol_orders(symbol):
-    """Бүх төрлийн orders-г цуцлах (энгийн + algo)"""
     normal = cancel_all_orders(symbol)
-    time.sleep(0.2)
-    algo = cancel_all_algo_orders(symbol)
-    return {"normal": normal, "algo": algo}
+    return {"normal": normal, "algo": normal}
 
 
 # ==========================================================
@@ -712,6 +679,7 @@ def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slop
 # ==========================================================
 
 def calculate_correlation(symbol1, symbol2, lookback=50):
+    """Pearson correlation between two symbols."""
     try:
         df1 = get_klines(symbol1, interval="1h", limit=lookback + 10)
         df2 = get_klines(symbol2, interval="1h", limit=lookback + 10)
@@ -734,7 +702,7 @@ def calculate_correlation(symbol1, symbol2, lookback=50):
 
 
 # ==========================================================
-# 🛡️ MIN NOTIONAL CHECK
+# 🛡️ MIN NOTIONAL CHECK (Шинэ)
 # ==========================================================
 
 def check_min_notional(symbol, price, quantity):
@@ -748,7 +716,7 @@ def check_min_notional(symbol, price, quantity):
 
 
 # ==========================================================
-# 🔍 ANALYZE COIN
+# 🔍 ANALYZE COIN (Корреляци шалгалттай)
 # ==========================================================
 
 def analyze_coin(symbol, check_correlation=True, active_symbols=None):
@@ -822,7 +790,7 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
 
 
 # ==========================================================
-# 🏆 SCREENING
+# 🏆 SCREENING (Корреляци шүүлтүүртэй, candidate хооронд шалгах)
 # ==========================================================
 
 def screen_coins():
@@ -830,6 +798,7 @@ def screen_coins():
     print(f"🔍 MARKET SCREENING {datetime.now().strftime('%H:%M:%S')}")
     print("=" * 70)
 
+    # Эхлээд бүх койныг шинжлэх (одоо байгаа позицтой корреляци шалгах)
     current_positions = get_positions()
     active_symbols = {p["symbol"] for p in current_positions}
     analyses = []
@@ -838,6 +807,7 @@ def screen_coins():
         if result:
             analyses.append(result)
 
+    # Strategy тус бүрээр хамгийн сайн candidate сонгох
     strategy_candidates = []
     for strategy in STRATEGY_NAMES:
         if not strategy_stats[strategy]["active"]:
@@ -859,6 +829,7 @@ def screen_coins():
         strategy_candidates.append(best)
         print(f"🎯 {strategy:<30} → {best['symbol']:<10} {best['signal']:<4} Score={best['score']:.2f}")
 
+    # Давхардсан symbol-ыг шийдвэрлэх
     by_symbol = defaultdict(list)
     for candidate in strategy_candidates:
         by_symbol[candidate["symbol"]].append(candidate)
@@ -869,6 +840,7 @@ def screen_coins():
         if len(candidates) > 1:
             print(f"🔄 DUPLICATE {symbol}: WINNER {winner['strategy']}")
 
+    # Одоо candidate-ууд хоорондоо корреляци шалгах
     if CORRELATION_ENABLED:
         final_selected = []
         for i, coin in enumerate(unique_candidates):
@@ -898,7 +870,7 @@ def screen_coins():
 
 def send_selection_report(selected):
     if not selected:
-        send_telegram("⚠️ SIGNAL ОЛДСОНГҮЙ\n━━━━━━━━━━━━━━━━━\nЭнэ cycle-д trade нээхгүй.")
+        send_telegram("⚠️ *SIGNAL ОЛДСОНГҮЙ*\n━━━━━━━━━━━━━━━━━\nЭнэ cycle-д trade нээхгүй.")
         return
     sections = []
     for i, coin in enumerate(selected, 1):
@@ -916,10 +888,11 @@ def send_selection_report(selected):
 
 
 # ==========================================================
-# 🧪 BACKTESTING
+# 🧪 BACKTESTING (fee/slippage моделтой)
 # ==========================================================
 
 def run_backtest(symbol, strategy, days=30, interval="1h"):
+    """Directional backtest with next-bar execution, fees, slippage and drawdown."""
     print(f"\n🧪 Backtesting {strategy} on {symbol} for {days} days ({interval})")
     try:
         limit = days * 24 if interval == "1h" else days * 24 * 4 if interval == "15m" else days * 6
@@ -1033,7 +1006,7 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
 
 
 # ==========================================================
-# 🔄 RECOVER EXISTING POSITIONS
+# 🔄 RECOVER EXISTING POSITIONS (хамгаалалт шалгах + сэргээх)
 # ==========================================================
 
 def sync_existing_positions():
@@ -1052,8 +1025,15 @@ def sync_existing_positions():
         qty = abs(amount)
         entry = pos["entryPrice"]
 
-        # Хамгаалалт байгаа эсэхийг шалгахгүй, үргэлж дахин байгуулна
+        # Хамгаалалт байгаа эсэхийг шалгах (энгийн орд болон conditional
+        # захиалгууд бүгд /fapi/v1/openOrders дотор ижил байрладаг)
+        open_orders = send_signed_request("GET", "/fapi/v1/openOrders", {"symbol": symbol})
         has_protection = False
+        if isinstance(open_orders, list):
+            for order in open_orders:
+                if order.get("symbol") == symbol and order.get("type") in ("TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
+                    has_protection = True
+                    break
 
         active_trade_info[symbol] = {
             "strategy": "RECOVERED",
@@ -1174,15 +1154,22 @@ def finalize_trade(symbol, trade_data):
 
 
 # ==========================================================
-# ⚙️ LEVERAGE
+# ⚙️ LEVERAGE (бодит хөшүүргийг авах)
 # ==========================================================
 
 def get_actual_leverage(symbol):
+    """Get the current leverage for a symbol (cached)."""
     if symbol in leverage_cache:
         return leverage_cache[symbol]
-    return LEVERAGE
+    result = send_signed_request("GET", "/fapi/v1/leverage", {"symbol": symbol})
+    if is_api_error(result):
+        return LEVERAGE
+    lev = int(result.get("leverage", LEVERAGE))
+    leverage_cache[symbol] = lev
+    return lev
 
 def ensure_leverage(symbol, leverage=LEVERAGE):
+    # Хэрэв аль хэдийн тохируулсан бол шалгах
     if leverage_cache.get(symbol) == leverage:
         return True
     result = send_signed_request("POST", "/fapi/v1/leverage", {
@@ -1190,6 +1177,7 @@ def ensure_leverage(symbol, leverage=LEVERAGE):
         "leverage": leverage
     })
     if is_api_error(result):
+        # 4141 = leverage already set
         if safe_float(result.get("code"), 0) == -4141:
             leverage_cache[symbol] = leverage
             return True
@@ -1219,10 +1207,12 @@ def calculate_trailing_activation(symbol, signal, entry_price):
 
 
 # ==========================================================
-# 🛡️ REBUILD PROTECTION ORDERS
+# 🛡️ REBUILD PROTECTION ORDERS (цэвэр атомар)
 # ==========================================================
 
 def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side):
+    """Rebuild TP + trailing + fallback SL atomically from the bot's perspective.
+    Returns (success: bool, tp_price, activation_price)."""
     close_side = "SELL" if side == "BUY" else "BUY"
     if quantity <= 0 or entry_price <= 0:
         return False, None, None
@@ -1235,34 +1225,35 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
         emergency_sl_price = round_price(symbol, entry_price * (1 + EMERGENCY_SL_PCT / 100))
 
     if tp_price is None or emergency_sl_price is None:
+        # Symbol info олдсонгүй — тодорхойгүй нарийвчлалаар order оруулахгүй
         return False, None, None
 
     activation_price = calculate_trailing_activation(symbol, side, entry_price)
     if activation_price is None:
         return False, tp_price, None
 
+    # Cancel stale conditional orders
     cancel_all_algo_orders(symbol)
-
-    # Trailing stop
     trailing = place_trailing_stop_order(symbol, close_side, quantity, TRAILING_CALLBACK_RATE, activation_price, position_side)
     trailing_ok = not is_api_error(trailing)
 
-    if not trailing_ok:
-        # Fallback: static stop loss
+    if trailing_ok:
+        sl = None
+    else:
         sl = place_stop_loss_order(symbol, close_side, quantity, emergency_sl_price, position_side)
         if is_api_error(sl):
             return False, tp_price, activation_price
 
-    # Take profit
     tp = place_take_profit_order(symbol, close_side, quantity, tp_price, position_side)
     if is_api_error(tp):
+        # Do not leave the position without a hard stop. Keep the successful stop/trailing in place.
         return False, tp_price, activation_price
 
     return True, tp_price, activation_price
 
 
 # ==========================================================
-# 🚀 EXECUTE TRADES
+# 🚀 EXECUTE TRADES (rebuild_protection_orders ашиглах)
 # ==========================================================
 
 def execute_trades(selected_coins, total_balance):
@@ -1297,6 +1288,7 @@ def execute_trades(selected_coins, total_balance):
             return
 
         margin = total_balance * TRADE_ALLOCATION
+        # Хэрэв symbol нь unprotected гэж тэмдэглэгдсэн бол алгасах
         if symbol in unprotected_symbols:
             print(f"⏸️ {symbol}: unprotected, skip new trade")
             continue
@@ -1335,6 +1327,7 @@ def execute_trades(selected_coins, total_balance):
         position_side = "LONG" if signal == "BUY" else "SHORT"
         print(f"\n🚀 OPEN {symbol}\nStrategy={strategy}\nSignal={signal}\nQty={quantity}")
 
+        # Market order (clientOrderId ашигласан)
         order = place_market_order(symbol, order_side, quantity, reduce_only=False, position_side=position_side)
         if is_api_error(order):
             send_telegram(format_block("ORDER FAILED", "❌", [("Symbol", symbol), ("Error", str(order)[:300])]))
@@ -1360,6 +1353,7 @@ def execute_trades(selected_coins, total_balance):
             entry_price = price
         opened_at_ms = current_timestamp_ms()
 
+        # DCA info эхлүүлэх
         dca_info[symbol] = {
             "level": 0,
             "avg_price": entry_price,
@@ -1367,8 +1361,10 @@ def execute_trades(selected_coins, total_balance):
             "total_qty": actual_quantity
         }
 
+        # Хамгаалалтын захиалгуудыг байршуулах (нэгдсэн функц)
         success, tp_price, activation_price = rebuild_protection_orders(symbol, signal, actual_quantity, entry_price, actual_position_side)
         if not success:
+            # Хамгаалалт бүтэлгүйтсэн → position-ийг хаах
             send_telegram(format_block("PROTECTION FAILED", "🚨", [("Symbol", symbol), ("Action", "Closing position")]))
             close_result = place_market_order(symbol, close_side, actual_quantity, reduce_only=True, position_side=actual_position_side)
             if is_api_error(close_result):
@@ -1378,6 +1374,7 @@ def execute_trades(selected_coins, total_balance):
             existing_symbols.discard(symbol)
             if symbol in dca_info:
                 del dca_info[symbol]
+            # Emergency close-ийн PnL бүртгэх
             pnl = get_trade_realized_pnl(symbol, opened_at_ms)
             update_strategy_performance(strategy, pnl)
             send_telegram(format_block("EMERGENCY CLOSED", "⚠️", [("Symbol", symbol), ("PnL", money(pnl))]))
@@ -1425,7 +1422,7 @@ def execute_trades(selected_coins, total_balance):
 
 
 # ==========================================================
-# 📡 DCA MANAGEMENT
+# 📡 DCA MANAGEMENT (rebuild_protection ашиглах)
 # ==========================================================
 
 def manage_dca():
@@ -1466,6 +1463,7 @@ def manage_dca():
         if add_qty is None or add_qty <= 0:
             continue
 
+        # Portfolio margin guard
         current_margin_used = 0.0
         for p in positions:
             actual_lev = get_actual_leverage(p["symbol"])
@@ -1475,6 +1473,7 @@ def manage_dca():
             print(f"⏸️ DCA blocked {symbol}: portfolio margin limit")
             continue
 
+        # Order
         order = place_market_order(symbol, side, add_qty, reduce_only=False, position_side=position_side if position_side != "BOTH" else None)
         if is_api_error(order):
             send_telegram(format_block("DCA FAILED", "⚠️", [("Symbol", symbol), ("Error", str(order)[:300])]))
@@ -1495,9 +1494,11 @@ def manage_dca():
         new_avg = ((old_qty * avg_price) + (add_qty * fill_price)) / (old_qty + add_qty)
         new_level = current_level + 1
 
+        # Rebuild protection
         dca_success, _, _ = rebuild_protection_orders(symbol, side, actual_qty, new_avg, refreshed.get("positionSide", position_side))
         if not dca_success:
             send_telegram(format_block("DCA PROTECTION FAILED", "⚠️", [("Symbol", symbol), ("Status", "DCA executed without protection")]))
+            # Do not stop bot, but mark symbol as unprotected to avoid further trades
             unprotected_symbols.add(symbol)
             continue
 
@@ -1532,6 +1533,9 @@ def close_one_position(pos):
     close_side = "SELL" if amount > 0 else "BUY"
     quantity = round_quantity(symbol, abs(amount))
     if quantity is None:
+        # Position хаах ажиллагааг ХЭЗЭЭ Ч алгасахгүй — эсхүл symbol info
+        # байхгүй байсан ч, Binance дээр аль хэдийн байгаа position хэмжээ
+        # хүчинтэй тул яг тэр хэмжээгээрээ хаана.
         quantity = abs(amount)
         print(f"⚠️ {symbol}: no exchange info — closing with raw position size {quantity}")
     position_side = pos.get("positionSide", "BOTH")
@@ -1696,7 +1700,7 @@ def target_cooldown():
 
 
 # ==========================================================
-# 📡 MONITOR
+# 📡 MONITOR (DCA дуудах хэсэг нэмэгдсэн)
 # ==========================================================
 
 def monitor_positions():
@@ -1719,6 +1723,7 @@ def monitor_positions():
     if not positions:
         return
 
+    # ---- DCA MANAGEMENT ----
     manage_dca()
 
     now = time.time()
@@ -1911,6 +1916,7 @@ def main():
     except Exception as e:
         print(f"⚠️ Exchange setup: {e}")
 
+    # Strategy state-г ачаалах
     load_strategy_state()
 
     try:
