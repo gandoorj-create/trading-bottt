@@ -9,23 +9,47 @@ import numpy as np
 import traceback
 import math
 import json
+import io
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
 from urllib.parse import urlencode
 
+# Timezone болон график
+try:
+    import pytz
+except ImportError:
+    print("⚠️ pytz not found. Installing...")
+    os.system("pip install pytz")
+    import pytz
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+except ImportError:
+    print("⚠️ matplotlib not found. Installing...")
+    os.system("pip install matplotlib")
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
 from telegram_format import format_block, format_section, money
 from settings import *
 
 # ==========================================================
-# 📦 ШИНЭ ТОХИРГОО (Default утгууд - settings.py-д нэмэх)
+# 📦 ТОХИРГОО
 # ==========================================================
-CHOP_PERIOD = 14
-SUPERTREND_PERIOD = 10
-SUPERTREND_MULTIPLIER = 3
-MTF_ENABLED = True
-VWAP_ENABLED = True
-FUNDING_ENABLED = True
+CHOP_PERIOD = getattr(settings, 'CHOP_PERIOD', 14)
+SUPERTREND_PERIOD = getattr(settings, 'SUPERTREND_PERIOD', 10)
+SUPERTREND_MULTIPLIER = getattr(settings, 'SUPERTREND_MULTIPLIER', 3)
+MTF_ENABLED = getattr(settings, 'MTF_ENABLED', True)
+VWAP_ENABLED = getattr(settings, 'VWAP_ENABLED', True)
+FUNDING_ENABLED = getattr(settings, 'FUNDING_ENABLED', True)
+ORDER_BOOK_ENABLED = getattr(settings, 'ORDER_BOOK_ENABLED', True)
+ORDER_BOOK_LIMIT = getattr(settings, 'ORDER_BOOK_LIMIT', 20)
+CHART_ENABLED = getattr(settings, 'CHART_ENABLED', True)
+CHART_SEND_ON_SIGNAL = getattr(settings, 'CHART_SEND_ON_SIGNAL', True)
 
 # ==========================================================
 # 📦 STATE PERSISTENCE
@@ -35,11 +59,11 @@ BACKTEST_FEE_RATE = 0.0004
 BACKTEST_SLIPPAGE_RATE = 0.0005
 
 # ==========================================================
-# 🧠 STRATEGY SETTINGS (Шинэчлэгдсэн: EMA_CROSSOVER -> SUPERTREND)
+# 🧠 STRATEGY SETTINGS
 # ==========================================================
 
 STRATEGY_NAMES = [
-    "SUPERTREND",                # Хуучин EMA-г орлох
+    "SUPERTREND",
     "MACD_MOMENTUM",
     "GRID_TRADING",
     "BOLLINGER_MEAN_REVERSION",
@@ -131,6 +155,10 @@ position_mode_cache = None
 safety_lock = False
 unprotected_symbols = set()
 
+# ---- Correlation Cache ----
+_correlation_cache = {}
+_correlation_cache_time = {}
+
 
 # ==========================================================
 # 🧰 GENERIC HELPERS
@@ -189,7 +217,7 @@ def current_timestamp_ms():
 
 
 # ==========================================================
-# 📱 TELEGRAM (parse_mode БҮРМӨСӨН ХАСАВ)
+# 📱 TELEGRAM
 # ==========================================================
 
 def send_telegram(text, pin=False):
@@ -213,6 +241,24 @@ def send_telegram(text, pin=False):
         return True
     except Exception as e:
         print(f"❌ Telegram exception: {e}")
+        return False
+
+def send_telegram_photo(photo_bytes, caption=""):
+    """Telegram-д зураг (chart) илгээх"""
+    if not BOT_TOKEN or not CHAT_ID:
+        return False
+    try:
+        url = f"{TELEGRAM_API_ROOT}/bot{BOT_TOKEN}/sendPhoto"
+        files = {'photo': ('chart.png', photo_bytes, 'image/png')}
+        data = {'chat_id': CHAT_ID, 'caption': caption}
+        response = requests.post(url, files=files, data=data, timeout=15)
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"❌ Photo send error: {response.text}")
+            return False
+    except Exception as e:
+        print(f"❌ Photo exception: {e}")
         return False
 
 
@@ -311,13 +357,10 @@ def get_symbol_info(symbol):
 def decimals_from_step(step):
     if not step or step <= 0:
         return 8
-    decimals = 0
-    while decimals < 12:
-        value = round(step * (10 ** decimals))
-        if abs(value - step * (10 ** decimals)) < 1e-8:
-            return decimals
-        decimals += 1
-    return 8
+    step_str = f"{step:.12f}".rstrip('0')
+    if '.' in step_str:
+        return len(step_str.split('.')[1])
+    return 0
 
 def round_quantity(symbol, quantity):
     info = get_symbol_info(symbol)
@@ -487,7 +530,23 @@ def cancel_all_orders(symbol):
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def cancel_all_algo_orders(symbol):
-    return send_signed_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+    """ЗӨВ арга: GET /openAlgoOrders → DELETE /algoOrder"""
+    try:
+        orders = send_signed_request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
+        if not isinstance(orders, list):
+            return {"status": "no_orders", "data": orders}
+        
+        results = []
+        for order in orders:
+            algo_id = order.get("algoId")
+            if algo_id:
+                result = send_signed_request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+                results.append(result)
+                time.sleep(0.1)
+        return {"status": "cancelled", "count": len(results), "results": results}
+    except Exception as e:
+        print(f"⚠️ Cancel algo orders error: {e}")
+        return {"status": "error", "error": str(e)}
 
 def cancel_all_symbol_orders(symbol):
     normal = cancel_all_orders(symbol)
@@ -520,11 +579,95 @@ def get_klines(symbol, interval="1h", limit=200):
 
 
 # ==========================================================
-# 📊 ШИНЭ ҮЗҮҮЛЭЛТҮҮД (CHOP, SUPERTREND, VWAP, FUNDING, MTF)
+# 📊 ORDER BOOK (DEPTH)
+# ==========================================================
+
+def get_order_book(symbol, limit=20):
+    try:
+        data = send_public_request("/fapi/v1/depth", {"symbol": symbol, "limit": limit})
+        bids = [[float(b[0]), float(b[1])] for b in data.get("bids", [])]
+        asks = [[float(a[0]), float(a[1])] for a in data.get("asks", [])]
+        return bids, asks
+    except Exception as e:
+        print(f"⚠️ Order book error {symbol}: {e}")
+        return [], []
+
+def find_strong_levels(symbol, price):
+    if not ORDER_BOOK_ENABLED:
+        return None, None
+    bids, asks = get_order_book(symbol, ORDER_BOOK_LIMIT)
+    if not bids or not asks:
+        return None, None
+    
+    total_bid_volume = sum(b[1] for b in bids)
+    total_ask_volume = sum(a[1] for a in asks)
+    
+    strong_bid = max(bids, key=lambda x: x[1]) if bids else None
+    strong_ask = max(asks, key=lambda x: x[1]) if asks else None
+    
+    support = strong_bid[0] if strong_bid else None
+    resistance = strong_ask[0] if strong_ask else None
+    
+    return support, resistance
+
+
+# ==========================================================
+# 📈 TELEGRAM GRAPHIC CHART
+# ==========================================================
+
+def send_chart(symbol, df, signal=None, score=None):
+    if not CHART_ENABLED:
+        return False
+    try:
+        df_plot = df.tail(100).copy()
+        if len(df_plot) < 20:
+            return False
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        ax.plot(df_plot.index, df_plot["close"], color='blue', linewidth=1.5, label='Close')
+        
+        ema20 = calculate_ema(df_plot, 20)
+        ema50 = calculate_ema(df_plot, 50)
+        ax.plot(df_plot.index, ema20, color='orange', linestyle='--', linewidth=1, label='EMA 20')
+        ax.plot(df_plot.index, ema50, color='red', linestyle='--', linewidth=1, label='EMA 50')
+        
+        upper, middle, lower = calculate_bollinger(df_plot)
+        ax.fill_between(df_plot.index, upper, lower, alpha=0.1, color='gray')
+        ax.plot(df_plot.index, upper, color='gray', linestyle=':', linewidth=0.8)
+        ax.plot(df_plot.index, lower, color='gray', linestyle=':', linewidth=0.8)
+        
+        if signal:
+            last_price = df_plot["close"].iloc[-1]
+            if signal == "BUY":
+                ax.scatter(df_plot.index[-1], last_price, color='green', s=100, marker='^', label='BUY')
+            elif signal == "SELL":
+                ax.scatter(df_plot.index[-1], last_price, color='red', s=100, marker='v', label='SELL')
+        
+        title = f"{symbol} | {signal if signal else 'No Signal'}"
+        if score:
+            title += f" | Score: {score:.2f}"
+        ax.set_title(title, fontsize=12)
+        ax.legend(loc='upper left')
+        ax.grid(True, alpha=0.3)
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        
+        caption = f"📊 {symbol} | Signal: {signal}" if signal else f"📊 {symbol}"
+        return send_telegram_photo(buf.getvalue(), caption)
+    except Exception as e:
+        print(f"❌ Chart generation error: {e}")
+        return False
+
+
+# ==========================================================
+# 📊 ШИНЭ ҮЗҮҮЛЭЛТҮҮД
 # ==========================================================
 
 def calculate_chop(df, period=14):
-    """Choppiness Index - зах зээлийн тренд/range тодорхойлох (0-100)"""
     high = df["high"]
     low = df["low"]
     close = df["close"]
@@ -533,7 +676,6 @@ def calculate_chop(df, period=14):
     max_high = high.rolling(period).max()
     min_low = low.rolling(period).min()
     
-    # 0-д хуваахаас сэргийлэх
     denominator = (max_high - min_low)
     denominator = denominator.replace(0, np.nan)
     
@@ -541,7 +683,6 @@ def calculate_chop(df, period=14):
     return chop.fillna(50)
 
 def calculate_supertrend(df, period=10, multiplier=3):
-    """Supertrend индикатор - Trend Following дохио"""
     high = df["high"]
     low = df["low"]
     close = df["close"]
@@ -552,7 +693,7 @@ def calculate_supertrend(df, period=10, multiplier=3):
     lower_band = hl2 - (multiplier * atr)
     
     supertrend = pd.Series(index=df.index, dtype=float)
-    direction = pd.Series(index=df.index, dtype=int)  # 1 = UP, -1 = DOWN
+    direction = pd.Series(index=df.index, dtype=int)
     
     for i in range(1, len(df)):
         if pd.isna(close.iloc[i]) or pd.isna(upper_band.iloc[i]) or pd.isna(lower_band.iloc[i]):
@@ -572,19 +713,16 @@ def calculate_supertrend(df, period=10, multiplier=3):
         
         supertrend.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == 1 else upper_band.iloc[i]
     
-    # Эхний утгуудыг бөглөх
     direction.iloc[0] = 1
     supertrend.iloc[0] = lower_band.iloc[0]
     return supertrend, direction
 
 def calculate_vwap(df):
-    """VWAP (Volume Weighted Average Price)"""
     typical_price = (df["high"] + df["low"] + df["close"]) / 3
     vwap = (typical_price * df["volume"]).cumsum() / df["volume"].cumsum()
     return vwap
 
 def get_funding_rate(symbol):
-    """Binance-ээс одоогийн funding rate авах"""
     if not FUNDING_ENABLED:
         return 0.0
     try:
@@ -595,7 +733,6 @@ def get_funding_rate(symbol):
         return 0.0
 
 def get_mtf_signal(symbol):
-    """Multi-Timeframe (4h, 1h) чиглэл тодорхойлох"""
     if not MTF_ENABLED:
         return "NEUTRAL"
     try:
@@ -622,7 +759,7 @@ def get_mtf_signal(symbol):
 
 
 # ==========================================================
-# 📊 INDICATORS (Хуучин үзүүлэлтүүд - EMA, RSI, MACD, ATR, ADX, Bollinger)
+# 📊 INDICATORS
 # ==========================================================
 
 def calculate_ema(df, period):
@@ -646,7 +783,6 @@ def calculate_atr(df, period=14):
     return tr.ewm(alpha=1/period, adjust=False).mean()
 
 def calculate_adx(df, period=14):
-    # ADX-г хэвээр үлдээсэн (бусад стратегид хэрэгтэй)
     high = df["high"]
     low = df["low"]
     close = df["close"]
@@ -687,16 +823,11 @@ def calculate_volume_ratio(df, period=20):
 
 
 # ==========================================================
-# 🧠 REGIME (Шинэчлэгдсэн: CHOP ашиглав)
+# 🧠 REGIME (CHOP-д суурилсан)
 # ==========================================================
 
 def determine_regime(chop, adx, ema_slope, atr_pct):
-    """
-    CHOP-д суурилсан зах зээлийн төлөв тодорхойлох.
-    CHOP < 38.2 -> Trend, CHOP > 61.8 -> Range
-    """
     if pd.isna(chop):
-        # Fallback to ADX if CHOP is NaN
         if adx >= 30 and abs(ema_slope) >= 0.5:
             return "STRONG_TREND"
         if adx >= 25:
@@ -707,21 +838,20 @@ def determine_regime(chop, adx, ema_slope, atr_pct):
             return "RANGE"
         return "TRANSITION"
     
-    # CHOP-based logic
-    if chop < 38.2:  # Trending
+    if chop < 38.2:
         if abs(ema_slope) >= 1.0:
             return "STRONG_TREND"
         return "TRENDING"
-    elif chop > 61.8:  # Ranging
+    elif chop > 61.8:
         if atr_pct >= 0.5:
             return "VOLATILE_RANGE"
         return "RANGE"
-    else:  # 38.2 - 61.8
+    else:
         return "TRANSITION"
 
 
 # ==========================================================
-# 🎯 SIGNAL GENERATION (Шинэчлэгдсэн: SUPERTREND нэмэв)
+# 🎯 SIGNAL GENERATION
 # ==========================================================
 
 def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
@@ -736,22 +866,18 @@ def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
     adx = calculate_adx(df).iloc[-1]
     ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
     
-    # VWAP (Mean Reversion-д зориулж)
     vwap = calculate_vwap(df).iloc[-1] if VWAP_ENABLED else close
 
     if strategy == "SUPERTREND":
-        # Хуучин EMA_CROSSOVER-г орлох
         st, direction = calculate_supertrend(df, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
         if len(direction) < 2:
             return "HOLD"
-        # BUY дохио: -1 -> 1 болсон үед (эсвэл 1 хэвээр байвал)
         if direction.iloc[-1] == 1 and direction.iloc[-2] == -1:
             if sentiment >= -0.4 and regime in ["TRENDING", "STRONG_TREND"]:
                 return "BUY"
         if direction.iloc[-1] == -1 and direction.iloc[-2] == 1:
             if sentiment <= 0.4 and regime in ["TRENDING", "STRONG_TREND"]:
                 return "SELL"
-        # Хэрэв аль хэдийн чиглэлдээ байгаа бол HOLD
         return "HOLD"
 
     elif strategy == "MACD_MOMENTUM":
@@ -763,7 +889,6 @@ def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
         if regime in ["RANGE", "VOLATILE_RANGE"] and close >= upper.iloc[-1] and rsi > 60: return "SELL"
 
     elif strategy == "BOLLINGER_MEAN_REVERSION":
-        # VWAP-тай хослуулах
         if regime in ["RANGE", "VOLATILE_RANGE"]:
             vwap_deviation = (close - vwap) / vwap * 100
             if close < lower.iloc[-1] and rsi < 35 and vwap_deviation < -1.0:
@@ -785,18 +910,16 @@ def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
 
 
 # ==========================================================
-# 📊 SCORE (Шинэчлэгдсэн: CHOP болон MTF нөлөөлнө)
+# 📊 SCORE
 # ==========================================================
 
 def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slope, sentiment, regime, chop, mtf_signal):
     score = 0.0
     
-    # MTF шүүлтүүр: Хэрэв BULLISH биш бол Trend стратегиудын оноог бууруулах
     mtf_penalty = 0
     if mtf_signal == "NEUTRAL":
-        mtf_penalty = -5  # Тодорхойгүй бол оноог хасах
+        mtf_penalty = -5
     
-    # CHOP-д суурилсан Regime оноо
     chop_score = 0
     if regime in ["STRONG_TREND", "TRENDING"]:
         chop_score = 5
@@ -835,8 +958,20 @@ def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slop
 
 
 # ==========================================================
-# 📊 CORRELATION
+# 📊 CORRELATION (Кэштэй)
 # ==========================================================
+
+def calculate_correlation_cached(symbol1, symbol2, lookback=50):
+    global _correlation_cache, _correlation_cache_time
+    key = f"{symbol1}_{symbol2}"
+    now = time.time()
+    if key in _correlation_cache and (now - _correlation_cache_time.get(key, 0)) < CORRELATION_CACHE_TTL:
+        return _correlation_cache[key]
+    
+    corr = calculate_correlation(symbol1, symbol2, lookback)
+    _correlation_cache[key] = corr
+    _correlation_cache_time[key] = now
+    return corr
 
 def calculate_correlation(symbol1, symbol2, lookback=50):
     try:
@@ -875,7 +1010,7 @@ def check_min_notional(symbol, price, quantity):
 
 
 # ==========================================================
-# 🔍 ANALYZE COIN (Шинэчлэгдсэн: MTF, Funding, CHOP, VWAP нэмэгдсэн)
+# 🔍 ANALYZE COIN
 # ==========================================================
 
 def analyze_coin(symbol, check_correlation=True, active_symbols=None):
@@ -884,18 +1019,16 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         if len(df) < 100:
             return None
 
-        # 1. MTF шүүлтүүр
         mtf_signal = get_mtf_signal(symbol)
         if MTF_ENABLED and mtf_signal == "NEUTRAL":
-            print(f"⏸️ SKIPPED {symbol}: MTF Neutral (4h/1h conflict)")
+            print(f"⏸️ SKIPPED {symbol}: MTF Neutral")
             return None
 
-        # 2. Корреляци шалгах
         if CORRELATION_ENABLED and check_correlation and active_symbols:
             for sym in active_symbols:
                 if sym == symbol:
                     continue
-                corr = calculate_correlation(symbol, sym, CORRELATION_LOOKBACK)
+                corr = calculate_correlation_cached(symbol, sym, CORRELATION_LOOKBACK)
                 if abs(corr) > CORRELATION_THRESHOLD:
                     print(f"🔴 SKIPPED {symbol}: Correlation with {sym} = {corr:.2f}")
                     return None
@@ -911,19 +1044,21 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
         volume_ratio = calculate_volume_ratio(df)
         
-        # 3. Шинэ үзүүлэлтүүд
         chop = calculate_chop(df, CHOP_PERIOD).iloc[-1]
         vwap = calculate_vwap(df).iloc[-1]
         funding_rate = get_funding_rate(symbol)
         
-        # 4. Sentiment (Funding Rate нөлөө)
+        # Order Book-оос хүчтэй түвшингүүд
+        support, resistance = find_strong_levels(symbol, close)
+        if support and resistance:
+            print(f"🔹 {symbol} Support: {support:.2f} | Resistance: {resistance:.2f}")
+        
         sentiment = 0.0
         if funding_rate > 0.01:
-            sentiment -= 0.5  # Хэт их LONG -> Bearish
+            sentiment -= 0.5
         elif funding_rate < -0.01:
-            sentiment += 0.5  # Хэт их SHORT -> Bullish
+            sentiment += 0.5
         
-        # 5. Regime (CHOP-ээр тодорхойлох)
         regime = determine_regime(chop, adx, ema_slope, atr_pct)
 
         strategy_results = {}
@@ -936,7 +1071,6 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
             )
             signal = generate_strategy_signal(strategy, df, sentiment, regime, chop)
             
-            # Нэмэлт шүүлтүүрүүд
             if signal == "BUY" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] < ema50.iloc[-1]:
                 signal = "HOLD"
             if signal == "SELL" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] > ema50.iloc[-1]:
@@ -1038,7 +1172,7 @@ def screen_coins():
         for i, coin in enumerate(unique_candidates):
             ok = True
             for j in range(i):
-                if abs(calculate_correlation(coin["symbol"], unique_candidates[j]["symbol"], CORRELATION_LOOKBACK)) > CORRELATION_THRESHOLD:
+                if abs(calculate_correlation_cached(coin["symbol"], unique_candidates[j]["symbol"], CORRELATION_LOOKBACK)) > CORRELATION_THRESHOLD:
                     ok = False
                     removed_by_correlation.append(coin["symbol"])
                     print(f"🔴 REMOVED {coin['symbol']}: high correlation with {unique_candidates[j]['symbol']}")
@@ -1078,6 +1212,13 @@ def screen_coins():
     print("\n🏆 FINAL SELECTION:")
     for i, coin in enumerate(selected, 1):
         print(f"{i}. {coin['symbol']} | {coin['strategy']} | {coin['signal']} | Score={coin['score']:.2f}")
+
+    # Дохио гарсан coin-д график илгээх
+    if CHART_SEND_ON_SIGNAL:
+        for coin in selected:
+            symbol = coin['symbol']
+            df = get_klines(symbol, "1h", 200)
+            send_chart(symbol, df, coin['signal'], coin['score'])
 
     send_selection_report(selected, strategy_candidates, skipped_reasons)
     return selected
@@ -1148,7 +1289,6 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
             ema_slope = ((ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100) if ema50.iloc[-5] else 0.0
             volume_ratio = calculate_volume_ratio(window)
             sentiment = 0.0
-            # Backtest-д CHOP ашиглах
             chop = calculate_chop(window, CHOP_PERIOD).iloc[-1]
             regime = determine_regime(chop, adx, ema_slope, atr_pct)
             signal = generate_strategy_signal(strategy, window, sentiment, regime, chop)
@@ -1640,99 +1780,12 @@ def execute_trades(selected_coins, total_balance):
 
 
 # ==========================================================
-# 📡 DCA MANAGEMENT
+# 📡 DCA MANAGEMENT (УНТРААСАН)
 # ==========================================================
 
 def manage_dca():
     if not DCA_ENABLED:
         return
-
-    positions = get_positions()
-    if not positions:
-        return
-
-    balance = get_usdt_balance()
-    max_margin = balance * MAX_TOTAL_MARGIN_USAGE
-
-    for pos in positions:
-        symbol = pos["symbol"]
-        current_price = safe_float(pos.get("markPrice"))
-        amount = safe_float(pos.get("positionAmt"))
-        if current_price <= 0 or amount == 0:
-            continue
-        if symbol not in dca_info:
-            continue
-
-        side = "BUY" if amount > 0 else "SELL"
-        position_side = pos.get("positionSide", "BOTH")
-        info = dca_info[symbol]
-        avg_price = safe_float(info.get("avg_price"))
-        current_level = int(info.get("level", 0))
-        if avg_price <= 0 or current_level >= DCA_LEVELS:
-            continue
-
-        move_against = ((avg_price - current_price) / avg_price * 100) if side == "BUY" else ((current_price - avg_price) / avg_price * 100)
-        trigger_pct = DCA_TRIGGER_PCT * (current_level + 1)
-        if move_against < trigger_pct:
-            continue
-
-        base_qty = safe_float(info.get("base_qty"))
-        add_qty = round_quantity(symbol, base_qty * DCA_MULTIPLIER)
-        if add_qty is None or add_qty <= 0:
-            continue
-
-        current_margin_used = 0.0
-        for p in positions:
-            actual_lev = get_actual_leverage(p["symbol"])
-            current_margin_used += abs(p["positionAmt"]) * p["entryPrice"] / actual_lev
-        additional_margin = add_qty * current_price / get_actual_leverage(symbol)
-        if current_margin_used + additional_margin > max_margin:
-            print(f"⏸️ DCA blocked {symbol}: portfolio margin limit")
-            continue
-
-        order = place_market_order(symbol, side, add_qty, reduce_only=False, position_side=position_side if position_side != "BOTH" else None)
-        if is_api_error(order):
-            send_telegram(format_block("DCA FAILED", "⚠️", [("Symbol", symbol), ("Error", str(order)[:300])]))
-            continue
-
-        time.sleep(0.5)
-        refreshed = next((p for p in get_positions() if p["symbol"] == symbol), None)
-        if not refreshed:
-            send_telegram(format_block("DCA VERIFY FAILED", "🚨", [("Symbol", symbol), ("Status", "Skipping further DCA")]))
-            continue
-
-        actual_qty = abs(safe_float(refreshed.get("positionAmt")))
-        fill_price = safe_float(order.get("avgPrice"), current_price)
-        if fill_price <= 0:
-            fill_price = current_price
-
-        old_qty = safe_float(info.get("total_qty"), abs(amount))
-        new_avg = ((old_qty * avg_price) + (add_qty * fill_price)) / (old_qty + add_qty)
-        new_level = current_level + 1
-
-        dca_success, _, _ = rebuild_protection_orders(symbol, side, actual_qty, new_avg, refreshed.get("positionSide", position_side))
-        if not dca_success:
-            send_telegram(format_block("DCA PROTECTION FAILED", "⚠️", [("Symbol", symbol), ("Status", "DCA executed without protection")]))
-            unprotected_symbols.add(symbol)
-            continue
-
-        info["level"] = new_level
-        info["avg_price"] = new_avg
-        info["total_qty"] = actual_qty
-
-        send_telegram(
-            format_block(
-                f"DCA EXECUTED for {symbol}",
-                "📊",
-                [
-                    ("Level", f"{new_level}/{DCA_LEVELS}"),
-                    ("Added Qty", add_qty),
-                    ("Side", side),
-                    ("New Avg Price", f"${new_avg:.4f}"),
-                    ("Total Qty", actual_qty),
-                ]
-            )
-        )
 
 
 # ==========================================================
@@ -1956,6 +2009,141 @@ def check_drawdown_circuit_breaker():
 
 
 # ==========================================================
+# 🌐 NEWS TRADING
+# ==========================================================
+
+def get_next_cpi_event():
+    if not NEWS_CALENDAR_URL:
+        return None
+    try:
+        resp = requests.get(NEWS_CALENDAR_URL, timeout=10)
+        data = resp.json()
+        now = datetime.now(pytz.UTC)
+        for item in data:
+            if "CPI" in item.get("title", "") and "USD" in item.get("country", ""):
+                event_time = datetime.fromisoformat(item["date"]).replace(tzinfo=pytz.timezone('America/New_York'))
+                event_time_utc = event_time.astimezone(pytz.UTC)
+                if event_time_utc > now:
+                    return event_time_utc
+    except Exception as e:
+        print(f"⚠️ News calendar error: {e}")
+    return None
+
+news_mode_active = False
+news_trade_done = False
+last_news_check = 0
+next_news_time = None
+
+def check_news_status():
+    global news_mode_active, news_trade_done, next_news_time, safety_lock
+    if not NEWS_ENABLED:
+        return
+
+    now = datetime.now(pytz.UTC)
+    if not next_news_time or (now - last_news_check).seconds > 3600:
+        next_news_time = get_next_cpi_event()
+        last_news_check = now
+
+    if not next_news_time:
+        return
+
+    diff = (next_news_time - now).total_seconds() / 60
+
+    if 0 < diff < NEWS_PAUSE_BEFORE:
+        news_mode_active = True
+        news_trade_done = False
+        print(f"📰 News approaching in {diff:.0f} min. Pausing new technical trades.")
+        safety_lock = True
+        return
+
+    if -NEWS_WAIT_AFTER < diff < 0:
+        news_mode_active = True
+        print(f"📰 News just released. Waiting {NEWS_WAIT_AFTER} min for stability...")
+        safety_lock = True
+        return
+
+    if diff <= -NEWS_WAIT_AFTER and news_mode_active and not news_trade_done:
+        print("📰 News cooldown finished. Executing post-news trade...")
+        execute_post_news_trade()
+        news_trade_done = True
+        news_mode_active = False
+        safety_lock = False
+        return
+
+    if diff <= - (NEWS_WAIT_AFTER + 30) and news_mode_active:
+        news_mode_active = False
+        safety_lock = False
+        print("✅ News window closed. Resuming normal trading.")
+
+def execute_post_news_trade():
+    global news_trade_done
+    if news_trade_done:
+        return
+
+    for symbol in NEWS_SYMBOLS:
+        df = get_klines(symbol, interval="15m", limit=10)
+        if len(df) < 5:
+            continue
+
+        first_close = df.iloc[0]["close"]
+        last_close = df.iloc[-1]["close"]
+        move_pct = (last_close - first_close) / first_close * 100
+
+        if abs(move_pct) < NEWS_MIN_MOVE:
+            print(f"⏸️ {symbol} move {move_pct:.2f}% < {NEWS_MIN_MOVE}%, skipping.")
+            continue
+
+        side = "BUY" if move_pct > 0 else "SELL"
+        close_side = "SELL" if side == "BUY" else "BUY"
+        position_side = "LONG" if side == "BUY" else "SHORT"
+
+        balance = get_usdt_balance()
+        allocation = balance * NEWS_ALLOCATION
+        notional = allocation * NEWS_LEVERAGE
+        price = last_close
+        quantity = notional / price
+        quantity = round_quantity(symbol, quantity)
+        if quantity is None or quantity <= 0:
+            continue
+
+        order = place_market_order(symbol, side, quantity, reduce_only=False, position_side=position_side)
+        if is_api_error(order):
+            send_telegram(f"❌ News trade order failed for {symbol}: {order}")
+            continue
+
+        entry_price = safe_float(order.get("avgPrice"), price)
+        if entry_price <= 0:
+            entry_price = price
+
+        if side == "BUY":
+            sl_price = round_price(symbol, entry_price * (1 - NEWS_SL_PCT / 100))
+            tp_price = round_price(symbol, entry_price * (1 + NEWS_TP_PCT / 100))
+        else:
+            sl_price = round_price(symbol, entry_price * (1 + NEWS_SL_PCT / 100))
+            tp_price = round_price(symbol, entry_price * (1 - NEWS_TP_PCT / 100))
+
+        place_stop_loss_order(symbol, close_side, quantity, sl_price, position_side=position_side)
+        place_take_profit_order(symbol, close_side, quantity, tp_price, position_side=position_side)
+
+        send_telegram(
+            format_block(
+                "📰 POST-NEWS TRADE EXECUTED",
+                "🚀",
+                [
+                    ("Symbol", symbol),
+                    ("Side", side),
+                    ("Entry", f"${entry_price:.2f}"),
+                    ("SL", f"${sl_price:.2f} ({NEWS_SL_PCT}%)"),
+                    ("TP", f"${tp_price:.2f} ({NEWS_TP_PCT}%)"),
+                    ("Leverage", f"{NEWS_LEVERAGE}x"),
+                    ("Allocation", f"{NEWS_ALLOCATION*100:.1f}%"),
+                ]
+            )
+        )
+        break
+
+
+# ==========================================================
 # 📡 MONITOR
 # ==========================================================
 
@@ -2151,7 +2339,7 @@ def main():
     global session_start_balance, cycle_start_balance, last_cycle_balance, cycle_start_time, safety_lock, session_peak_balance, drawdown_halt
 
     print("=" * 70)
-    print("🤖 SMART BOT V2 (SUPERTREND + CHOP + MTF + VWAP + FUNDING)")
+    print("🤖 SMART BOT V2 (SUPERTREND + CHOP + MTF + VWAP + FUNDING + ORDERBOOK + CHART)")
     print("🎯 UNREALIZED $300 → REALIZED")
     print("😴 10 MIN COOLDOWN")
     print("🔄 AUTO RESUME")
@@ -2199,6 +2387,8 @@ def main():
                 ("Regime", "CHOP Index (38.2/61.8)"),
                 ("Trend Signal", "Supertrend (EMA-г орлосон)"),
                 ("Filters", "MTF (4h/1h) + VWAP + Funding Rate"),
+                ("Order Book", "Strong levels detection"),
+                ("Chart", "Telegram chart on signal"),
                 ("Leverage", f"{LEVERAGE}x"),
                 ("Allocation", f"{TRADE_ALLOCATION * 100:.0f}%"),
                 ("Target", f"${TARGET_PROFIT:.2f}"),
@@ -2253,6 +2443,19 @@ def main():
 
             if safety_lock:
                 safety_recovery()
+                time.sleep(MONITOR_INTERVAL_SEC)
+                continue
+
+            try:
+                check_news_status()
+            except Exception as e:
+                print(f"⚠️ News check error: {e}")
+
+            if news_mode_active:
+                try:
+                    monitor_positions()
+                except Exception as e:
+                    print(f"❌ Monitor error during news: {e}")
                 time.sleep(MONITOR_INTERVAL_SEC)
                 continue
 
