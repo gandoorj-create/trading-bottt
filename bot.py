@@ -385,7 +385,7 @@ def get_total_unrealized():
 
 
 # ==========================================================
-# 🛒 MARKET ORDER (стандарт)
+# 🛒 MARKET ORDER
 # ==========================================================
 
 def place_market_order(symbol, side, quantity, reduce_only=False, position_side=None, client_order_id=None):
@@ -410,33 +410,19 @@ def place_market_order(symbol, side, quantity, reduce_only=False, position_side=
 
 
 # ==========================================================
-# 🛡️ FUTURES STOP / TAKE PROFIT / TRAILING (ЗӨВ)
+# 🛡️ ALGO ORDERS (STOP / TAKE PROFIT / TRAILING)
 # ==========================================================
 
-def place_futures_stop_order(symbol, side, quantity, stop_price, order_type="STOP_MARKET", position_side=None):
-    """
-    Futures дээр stop loss эсвэл take profit захиалга байршуулах
-    side: "BUY" эсвэл "SELL" (позицыг хаах чиглэл)
-    order_type: "STOP_MARKET" эсвэл "TAKE_PROFIT_MARKET"
-    """
-    params = {
-        "symbol": symbol,
-        "side": side,
-        "type": order_type,
-        "quantity": str(quantity),
-        "stopPrice": str(stop_price),
-        "workingType": "MARK_PRICE",
-        "newOrderRespType": "RESULT",
-        "reduceOnly": "true"
-    }
-    if position_side and position_side != "BOTH":
-        params["positionSide"] = position_side
-    return send_signed_request("POST", "/fapi/v1/order", params)
+def place_algo_order(params):
+    params = params.copy()
+    # Futures algo order-д algoType шаардлагагүй, type параметрээр тодорхойлогддог
+    # params["algoType"] = "CONDITIONAL"  # Энэ мөрийг хассан
+    hedge_mode = get_position_mode()
+    if hedge_mode:
+        params.pop("reduceOnly", None)
+    return send_signed_request("POST", "/fapi/v1/algoOrder", params)
 
-def place_futures_trailing_stop_order(symbol, side, quantity, callback_rate, activation_price=None, position_side=None):
-    """
-    Futures дээр trailing stop захиалга байршуулах
-    """
+def place_trailing_stop_order(symbol, side, quantity, callback_rate, activation_price=None, position_side=None):
     params = {
         "symbol": symbol,
         "side": side,
@@ -444,26 +430,65 @@ def place_futures_trailing_stop_order(symbol, side, quantity, callback_rate, act
         "quantity": str(quantity),
         "callbackRate": str(callback_rate),
         "workingType": "MARK_PRICE",
-        "newOrderRespType": "RESULT",
-        "reduceOnly": "true"
+        "newOrderRespType": "RESULT"
     }
+    hedge_mode = get_position_mode()
+    if hedge_mode:
+        if position_side:
+            params["positionSide"] = position_side
+    else:
+        params["reduceOnly"] = "true"
     if activation_price is not None:
-        params["activationPrice"] = str(activation_price)
-    if position_side and position_side != "BOTH":
-        params["positionSide"] = position_side
-    return send_signed_request("POST", "/fapi/v1/order", params)
+        params["activatePrice"] = str(activation_price)
+    return place_algo_order(params)
+
+def place_stop_loss_order(symbol, side, quantity, stop_price, position_side=None):
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "STOP_MARKET",
+        "quantity": str(quantity),
+        "triggerPrice": str(stop_price),
+        "workingType": "MARK_PRICE",
+        "newOrderRespType": "RESULT"
+    }
+    hedge_mode = get_position_mode()
+    if hedge_mode:
+        if position_side:
+            params["positionSide"] = position_side
+    else:
+        params["reduceOnly"] = "true"
+    return place_algo_order(params)
+
+def place_take_profit_order(symbol, side, quantity, tp_price, position_side=None):
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "TAKE_PROFIT_MARKET",
+        "quantity": str(quantity),
+        "triggerPrice": str(tp_price),
+        "workingType": "MARK_PRICE",
+        "newOrderRespType": "RESULT"
+    }
+    hedge_mode = get_position_mode()
+    if hedge_mode:
+        if position_side:
+            params["positionSide"] = position_side
+    else:
+        params["reduceOnly"] = "true"
+    return place_algo_order(params)
 
 
 # ==========================================================
-# 🧹 CANCEL ORDERS (Futures-д "algo" гэж байхгүй)
+# 🧹 CANCEL ORDERS
 # ==========================================================
 
 def cancel_all_orders(symbol):
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def cancel_all_algo_orders(symbol):
-    # Futures дээр тусдаа algo orders гэж байхгүй, зөвхөн open orders цуцлах
-    return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
+    # Algo orders-г цуцлах DELETE хүсэлт
+    return send_signed_request("DELETE", "/fapi/v1/algoOrder", {"symbol": symbol})
 
 def cancel_all_symbol_orders(symbol):
     normal = cancel_all_orders(symbol)
@@ -841,7 +866,7 @@ def screen_coins():
 
 
 # ==========================================================
-# 📱 SELECTION REPORT (* арилгасан)
+# 📱 SELECTION REPORT
 # ==========================================================
 
 def send_selection_report(selected):
@@ -981,7 +1006,7 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
 
 
 # ==========================================================
-# 🔄 RECOVER EXISTING POSITIONS (algoOpenOrders хасч, зөвхөн rebuild)
+# 🔄 RECOVER EXISTING POSITIONS (GET algoOrders хасч, зөвхөн rebuild)
 # ==========================================================
 
 def sync_existing_positions():
@@ -1123,11 +1148,10 @@ def finalize_trade(symbol, trade_data):
 
 
 # ==========================================================
-# ⚙️ LEVERAGE (кэш / default)
+# ⚙️ LEVERAGE
 # ==========================================================
 
 def get_actual_leverage(symbol):
-    # Бид өөрсдөө POST-оор хөшүүргийг тохируулдаг, GET байхгүй
     if symbol in leverage_cache:
         return leverage_cache[symbol]
     return LEVERAGE
@@ -1169,7 +1193,7 @@ def calculate_trailing_activation(symbol, signal, entry_price):
 
 
 # ==========================================================
-# 🛡️ REBUILD PROTECTION ORDERS (шинэ Futures функцүүдээр)
+# 🛡️ REBUILD PROTECTION ORDERS
 # ==========================================================
 
 def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side):
@@ -1191,27 +1215,20 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
     if activation_price is None:
         return False, tp_price, None
 
-    # Stale orders цуцлах
     cancel_all_algo_orders(symbol)
 
-    # 1. Trailing stop (Futures-д тохируулсан)
-    trailing = place_futures_trailing_stop_order(
-        symbol, close_side, quantity, TRAILING_CALLBACK_RATE, activation_price, position_side
-    )
+    # Trailing stop
+    trailing = place_trailing_stop_order(symbol, close_side, quantity, TRAILING_CALLBACK_RATE, activation_price, position_side)
     trailing_ok = not is_api_error(trailing)
 
     if not trailing_ok:
         # Fallback: static stop loss
-        sl = place_futures_stop_order(
-            symbol, close_side, quantity, emergency_sl_price, "STOP_MARKET", position_side
-        )
+        sl = place_stop_loss_order(symbol, close_side, quantity, emergency_sl_price, position_side)
         if is_api_error(sl):
             return False, tp_price, activation_price
 
-    # 2. Take profit
-    tp = place_futures_stop_order(
-        symbol, close_side, quantity, tp_price, "TAKE_PROFIT_MARKET", position_side
-    )
+    # Take profit
+    tp = place_take_profit_order(symbol, close_side, quantity, tp_price, position_side)
     if is_api_error(tp):
         return False, tp_price, activation_price
 
