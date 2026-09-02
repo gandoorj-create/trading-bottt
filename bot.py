@@ -177,7 +177,7 @@ def current_timestamp_ms():
 
 
 # ==========================================================
-# 📱 TELEGRAM (parse_mode-г зөв болгосон)
+# 📱 TELEGRAM
 # ==========================================================
 
 def send_telegram(text, pin=False, parse_mode=None):
@@ -410,13 +410,15 @@ def place_market_order(symbol, side, quantity, reduce_only=False, position_side=
 
 
 # ==========================================================
-# 🛡️ ALGO ORDERS (STOP / TAKE PROFIT / TRAILING)
+# 🛡️ ALGO ORDERS (STOP / TAKE PROFIT / TRAILING) - ЗӨВ
 # ==========================================================
 
 def place_algo_order(params):
+    """Futures algo order байршуулах (STOP, TAKE_PROFIT, TRAILING_STOP)"""
     params = params.copy()
-    # Futures algo order-д algoType шаардлагагүй, type параметрээр тодорхойлогддог
-    # params["algoType"] = "CONDITIONAL"  # Энэ мөрийг хассан
+    # ЗААВАЛ: algoType параметр заавал байх ёстой
+    params["algoType"] = "CONDITIONAL"
+    # hedge_mode-д тохируулах
     hedge_mode = get_position_mode()
     if hedge_mode:
         params.pop("reduceOnly", None)
@@ -439,7 +441,7 @@ def place_trailing_stop_order(symbol, side, quantity, callback_rate, activation_
     else:
         params["reduceOnly"] = "true"
     if activation_price is not None:
-        params["activatePrice"] = str(activation_price)
+        params["activationPrice"] = str(activation_price)
     return place_algo_order(params)
 
 def place_stop_loss_order(symbol, side, quantity, stop_price, position_side=None):
@@ -448,7 +450,7 @@ def place_stop_loss_order(symbol, side, quantity, stop_price, position_side=None
         "side": side,
         "type": "STOP_MARKET",
         "quantity": str(quantity),
-        "triggerPrice": str(stop_price),
+        "stopPrice": str(stop_price),
         "workingType": "MARK_PRICE",
         "newOrderRespType": "RESULT"
     }
@@ -466,7 +468,7 @@ def place_take_profit_order(symbol, side, quantity, tp_price, position_side=None
         "side": side,
         "type": "TAKE_PROFIT_MARKET",
         "quantity": str(quantity),
-        "triggerPrice": str(tp_price),
+        "stopPrice": str(tp_price),
         "workingType": "MARK_PRICE",
         "newOrderRespType": "RESULT"
     }
@@ -480,17 +482,42 @@ def place_take_profit_order(symbol, side, quantity, tp_price, position_side=None
 
 
 # ==========================================================
-# 🧹 CANCEL ORDERS
+# 🧹 CANCEL ORDERS - ЗӨВ
 # ==========================================================
 
 def cancel_all_orders(symbol):
+    """Энгийн open orders-г цуцлах"""
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def cancel_all_algo_orders(symbol):
-    # Algo orders-г цуцлах DELETE хүсэлт
-    return send_signed_request("DELETE", "/fapi/v1/algoOrder", {"symbol": symbol})
+    """
+    Algo orders-г цуцлах.
+    Binance Futures-д DELETE /fapi/v1/algoOrder нь 'algoId' эсвэл 'clientAlgoId' шаарддаг.
+    Бид бүх algo orders-г цуцлахын тулд эхлээд жагсаалтыг аваад тус бүрийг нь цуцлах хэрэгтэй.
+    """
+    try:
+        # Эхлээд бүх algo orders-г авах (GET /fapi/v1/algoOrders)
+        orders = send_signed_request("GET", "/fapi/v1/algoOrders", {"symbol": symbol})
+        if not isinstance(orders, list):
+            return {"status": "no_orders", "data": orders}
+        
+        results = []
+        for order in orders:
+            if order.get("symbol") != symbol:
+                continue
+            algo_id = order.get("algoId")
+            if algo_id:
+                # Тус бүрээр нь цуцлах
+                result = send_signed_request("DELETE", "/fapi/v1/algoOrder", {"algoId": algo_id})
+                results.append(result)
+                time.sleep(0.1)
+        return {"status": "cancelled", "count": len(results), "results": results}
+    except Exception as e:
+        print(f"⚠️ Cancel algo orders error: {e}")
+        return {"status": "error", "error": str(e)}
 
 def cancel_all_symbol_orders(symbol):
+    """Бүх төрлийн orders-г цуцлах (энгийн + algo)"""
     normal = cancel_all_orders(symbol)
     time.sleep(0.2)
     algo = cancel_all_algo_orders(symbol)
@@ -1006,7 +1033,7 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
 
 
 # ==========================================================
-# 🔄 RECOVER EXISTING POSITIONS (GET algoOrders хасч, зөвхөн rebuild)
+# 🔄 RECOVER EXISTING POSITIONS
 # ==========================================================
 
 def sync_existing_positions():
@@ -1025,8 +1052,7 @@ def sync_existing_positions():
         qty = abs(amount)
         entry = pos["entryPrice"]
 
-        # Хамгаалалт байгаа эсэхийг шалгахгүй (GET algoOpenOrders байхгүй)
-        # Үргэлж дахин байгуулна
+        # Хамгаалалт байгаа эсэхийг шалгахгүй, үргэлж дахин байгуулна
         has_protection = False
 
         active_trade_info[symbol] = {
