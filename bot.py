@@ -412,14 +412,16 @@ def place_market_order(symbol, side, quantity, reduce_only=False, position_side=
     return send_signed_request("POST", "/fapi/v1/order", params)
 
 def place_algo_order(params):
-    # Binance USDS-M Futures-д тусдаа "algo order" endpoint байхгүй.
-    # STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET бүгд
-    # ердийн /fapi/v1/order endpoint-оор явна.
+    # Binance-ийн 2025-12-09-ний migration-ийн дараа conditional order-ууд
+    # (STOP_MARKET/TAKE_PROFIT_MARKET/STOP/TAKE_PROFIT/TRAILING_STOP_MARKET)
+    # зөвхөн Algo Service /fapi/v1/algoOrder-ээр дамжина. Хуучин /fapi/v1/order
+    # эдгээр order type-уудыг -4120 алдаагаар блоклодог.
     params = params.copy()
+    params["algoType"] = "CONDITIONAL"
     hedge_mode = get_position_mode()
     if hedge_mode:
         params.pop("reduceOnly", None)
-    return send_signed_request("POST", "/fapi/v1/order", params)
+    return send_signed_request("POST", "/fapi/v1/algoOrder", params)
 
 def place_trailing_stop_order(symbol, side, quantity, callback_rate, activation_price=None, position_side=None):
     params = {
@@ -447,7 +449,7 @@ def place_stop_loss_order(symbol, side, quantity, stop_price, position_side=None
         "side": side,
         "type": "STOP_MARKET",
         "quantity": str(quantity),
-        "stopPrice": str(stop_price),
+        "triggerPrice": str(stop_price),
         "workingType": "MARK_PRICE",
         "newOrderRespType": "RESULT"
     }
@@ -465,7 +467,7 @@ def place_take_profit_order(symbol, side, quantity, tp_price, position_side=None
         "side": side,
         "type": "TAKE_PROFIT_MARKET",
         "quantity": str(quantity),
-        "stopPrice": str(tp_price),
+        "triggerPrice": str(tp_price),
         "workingType": "MARK_PRICE",
         "newOrderRespType": "RESULT"
     }
@@ -481,14 +483,15 @@ def cancel_all_orders(symbol):
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def cancel_all_algo_orders(symbol):
-    # STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET захиалгууд ердийн
-    # order-той адил байрладаг тул тусдаа "algo" cancel endpoint байхгүй.
-    # /fapi/v1/allOpenOrders нь тэдгээрийг бас цуцална.
-    return cancel_all_orders(symbol)
+    # Conditional (algo) захиалгуудыг цуцлах тусдаа endpoint (тэнцвэргүй нэршилтэй:
+    # GET нь "openAlgoOrders", DELETE нь "algoOpenOrders")
+    return send_signed_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
 
 def cancel_all_symbol_orders(symbol):
     normal = cancel_all_orders(symbol)
-    return {"normal": normal, "algo": normal}
+    time.sleep(0.2)
+    algo = cancel_all_algo_orders(symbol)
+    return {"normal": normal, "algo": algo}
 
 
 # ==========================================================
@@ -1025,13 +1028,13 @@ def sync_existing_positions():
         qty = abs(amount)
         entry = pos["entryPrice"]
 
-        # Хамгаалалт байгаа эсэхийг шалгах (энгийн орд болон conditional
-        # захиалгууд бүгд /fapi/v1/openOrders дотор ижил байрладаг)
-        open_orders = send_signed_request("GET", "/fapi/v1/openOrders", {"symbol": symbol})
+        # Хамгаалалт байгаа эсэхийг шалгах: conditional (algo) захиалгуудыг
+        # тусдаа Algo Service endpoint-оор асуух ёстой (GET /fapi/v1/openAlgoOrders)
+        algo_orders = send_signed_request("GET", "/fapi/v1/openAlgoOrders", {"symbol": symbol})
         has_protection = False
-        if isinstance(open_orders, list):
-            for order in open_orders:
-                if order.get("symbol") == symbol and order.get("type") in ("TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
+        if isinstance(algo_orders, list):
+            for order in algo_orders:
+                if order.get("symbol") == symbol and order.get("orderType") in ("TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
                     has_protection = True
                     break
 
