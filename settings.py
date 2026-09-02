@@ -1,13 +1,12 @@
 """
 settings.py
 Нууц зүйлийг .env-ээс, тохиргоог config.json-оос уншина.
-Хэрэглэх: from settings import *  эсвэл  import settings
 """
 import os
 import json
 from dotenv import load_dotenv
 
-load_dotenv()  # .env файлыг уншиж os.environ-д ачаална
+load_dotenv()
 
 # ---- Нууц (secrets) ----
 API_KEY = os.environ.get("BINANCE_API_KEY")
@@ -21,73 +20,8 @@ TELEGRAM_API_ROOT = os.environ.get("TELEGRAM_API_ROOT", "https://api.telegram.or
 # ---- Тохиргоо (config.json) ----
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
-try:
-    with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
-        _cfg = json.load(f)
-except FileNotFoundError:
-    _cfg = {
-        "symbols_pool": [
-            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-            "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "POLUSDT", "LINKUSDT",
-            "DOTUSDT", "UNIUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT"
-        ],
-        "selection_interval_minutes": 360,
-        "monitor_interval_sec": 30,
-        "telegram_report_interval_sec": 300,
-        "max_selections": 6,
-        "trade_allocation": 0.09,
-        "leverage": 5,
-        "trailing_callback_rate": 0.5,
-        "trailing_activation_pct": 1.0,
-        "take_profit_pct": 3.0,
-        "emergency_sl_pct": 5.0,
-        "target_profit_usdt": 300.0,
-        "target_cooldown_sec": 600,
-        "close_verify_attempts": 12,
-        "close_verify_delay_sec": 2,
-        "min_signal_score": 10.0,
-        "min_balance_usdt": 10.0,
-        "max_total_margin_usage": 0.55,
-        "max_session_drawdown_pct": 15.0,
-        "request_timeout": 15,
-        "pnl_lookback_limit": 100,
-        "adaptive_strategy": True,
-        "strategy_performance_tracking": True,
-        "consecutive_loss_limit": 3,
-        "strategy_cooldown_cycles": 2,
-        "dca_enabled": True,
-        "dca_levels": 2,
-        "dca_trigger_pct": 2.0,
-        "dca_multiplier": 1.0,
-        "correlation_enabled": True,
-        "correlation_threshold": 0.65,
-        "correlation_lookback": 50,
-        "backtest_enabled": False,
-        "backtest_days": 30,
-        "backtest_interval": "1h",
-        "backtest_fee_rate": 0.0004,
-        "backtest_slippage_rate": 0.0002,
-        "strategy_state_file": "strategy_state.json",
-        "chop_period": 14,
-        "supertrend_period": 10,
-        "supertrend_multiplier": 3,
-        "mtf_enabled": True,
-        "vwap_enabled": True,
-        "funding_enabled": True,
-        "news_trading": {
-            "enabled": False,
-            "calendar_url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
-            "pause_before_minutes": 30,
-            "wait_after_minutes": 15,
-            "max_positions": 1,
-            "leverage": 2,
-            "allocation": 0.05,
-            "tp_pct": 3.0,
-            "sl_pct": 1.0,
-            "min_move_pct": 0.5,
-            "symbols": ["BTCUSDT", "ETHUSDT"]
-        }
-    }
+with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+    _cfg = json.load(f)
 
 # ---- Үндсэн тохиргоо ----
 SYMBOLS_POOL = _cfg["symbols_pool"]
@@ -123,15 +57,24 @@ CONSECUTIVE_LOSS_LIMIT = _cfg["consecutive_loss_limit"]
 STRATEGY_COOLDOWN_CYCLES = _cfg["strategy_cooldown_cycles"]
 
 # ---- DCA ----
-DCA_ENABLED = _cfg["dca_enabled"]
-DCA_LEVELS = _cfg["dca_levels"]
-DCA_TRIGGER_PCT = _cfg["dca_trigger_pct"]
-DCA_MULTIPLIER = _cfg["dca_multiplier"]
+DCA_ENABLED = _cfg.get("dca_enabled", False)
+DCA_LEVELS = _cfg.get("dca_levels", 2)
+DCA_TRIGGER_PCT = _cfg.get("dca_trigger_pct", 2.0)
+DCA_MULTIPLIER = _cfg.get("dca_multiplier", 1.0)
 
 # ---- Correlation ----
 CORRELATION_ENABLED = _cfg["correlation_enabled"]
 CORRELATION_THRESHOLD = _cfg["correlation_threshold"]
 CORRELATION_LOOKBACK = _cfg["correlation_lookback"]
+CORRELATION_CACHE_TTL = _cfg.get("correlation_cache_ttl", 3600)
+
+# ---- Order Book ----
+ORDER_BOOK_ENABLED = _cfg.get("order_book_enabled", True)
+ORDER_BOOK_LIMIT = _cfg.get("order_book_limit", 20)
+
+# ---- Chart ----
+CHART_ENABLED = _cfg.get("chart_enabled", True)
+CHART_SEND_ON_SIGNAL = _cfg.get("chart_send_on_signal", True)
 
 # ---- Backtesting ----
 BACKTEST_ENABLED = _cfg.get("backtest_enabled", False)
@@ -179,7 +122,3 @@ def validate_config():
         raise RuntimeError(
             ".env дотор дараах утга дутуу байна: " + ", ".join(missing)
         )
-
-    # News Trading-ийн тохиргоо шалгах
-    if NEWS_ENABLED and not NEWS_CALENDAR_URL:
-        print("⚠️ News trading enabled but calendar_url is empty. News trading will be disabled.")
