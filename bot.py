@@ -537,13 +537,16 @@ def place_market_order(symbol, side, quantity, reduce_only=False, position_side=
     return send_signed_request("POST", "/fapi/v1/order", params)
 
 def place_conditional_order(params):
-    # Binance USD-M Futures has NO separate "algo order" API. Conditional orders
-    # (STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING_STOP_MARKET) go through the
-    # normal /fapi/v1/order endpoint. Hedge mode forbids reduceOnly.
+    # Since 2025-12-09 Binance USD-M Futures requires conditional orders
+    # (STOP_MARKET / TAKE_PROFIT_MARKET / STOP / TAKE_PROFIT / TRAILING_STOP_MARKET)
+    # to go through the separate Algo Order service, NOT /fapi/v1/order
+    # (that now returns -4120). Endpoint: POST /fapi/v1/algoOrder, algoType=CONDITIONAL.
+    # Trigger price param is `triggerPrice`, trailing activation is `activatePrice`.
     params = params.copy()
+    params["algoType"] = "CONDITIONAL"
     if get_position_mode():
         params.pop("reduceOnly", None)
-    return send_signed_request("POST", "/fapi/v1/order", params)
+    return send_signed_request("POST", "/fapi/v1/algoOrder", params)
 
 def place_trailing_stop_order(symbol, side, quantity, callback_rate, activation_price=None, position_side=None):
     params = {
@@ -562,7 +565,7 @@ def place_trailing_stop_order(symbol, side, quantity, callback_rate, activation_
     else:
         params["reduceOnly"] = "true"
     if activation_price is not None:
-        params["activationPrice"] = format_price(symbol, activation_price)
+        params["activatePrice"] = format_price(symbol, activation_price)
     return place_conditional_order(params)
 
 def place_stop_loss_order(symbol, side, quantity, stop_price, position_side=None):
@@ -572,7 +575,7 @@ def place_stop_loss_order(symbol, side, quantity, stop_price, position_side=None
         "symbol": symbol,
         "side": side,
         "type": "STOP_MARKET",
-        "stopPrice": format_price(symbol, stop_price),
+        "triggerPrice": format_price(symbol, stop_price),
         "closePosition": "true",
         "workingType": "MARK_PRICE",
         "newOrderRespType": "RESULT"
@@ -586,7 +589,7 @@ def place_take_profit_order(symbol, side, quantity, tp_price, position_side=None
         "symbol": symbol,
         "side": side,
         "type": "TAKE_PROFIT_MARKET",
-        "stopPrice": format_price(symbol, tp_price),
+        "triggerPrice": format_price(symbol, tp_price),
         "closePosition": "true",
         "workingType": "MARK_PRICE",
         "newOrderRespType": "RESULT"
@@ -599,12 +602,15 @@ def cancel_all_orders(symbol):
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
 def cancel_all_algo_orders(symbol):
-    # No separate algo-order API on Binance USD-M Futures — conditional orders
-    # are cancelled by allOpenOrders exactly like limit orders.
-    return cancel_all_orders(symbol)
+    # Conditional orders live in the separate Algo service since 2025-12-09;
+    # allOpenOrders does not touch them. One-shot cancel-all for the symbol.
+    return send_signed_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
 
 def cancel_all_symbol_orders(symbol):
-    return {"normal": cancel_all_orders(symbol)}
+    normal = cancel_all_orders(symbol)
+    time.sleep(0.15)
+    algo = cancel_all_algo_orders(symbol)
+    return {"normal": normal, "algo": algo}
 
 
 # ==========================================================
@@ -1458,11 +1464,11 @@ def sync_existing_positions():
         qty = abs(amount)
         entry = pos["entryPrice"]
 
-        open_orders = send_signed_request("GET", "/fapi/v1/openOrders", {"symbol": symbol})
+        algo_orders = send_signed_request("GET", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
         has_protection = False
-        if isinstance(open_orders, list):
-            for order in open_orders:
-                if order.get("symbol") == symbol and order.get("type") in ("TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
+        if isinstance(algo_orders, list):
+            for order in algo_orders:
+                if order.get("symbol") == symbol and order.get("orderType") in ("TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
                     has_protection = True
                     break
 
@@ -1654,7 +1660,7 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
     if tp_price is None or emergency_sl_price is None:
         return False, None, None
 
-    cancel_all_orders(symbol)
+    cancel_all_symbol_orders(symbol)
 
     # 1) Hard emergency stop — ALWAYS required. A trailing stop only arms after
     #    price moves in our favour by TRAILING_ACTIVATION_PCT, so a position that
