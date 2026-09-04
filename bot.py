@@ -108,6 +108,10 @@ def save_session_state():
             "session_start_balance": state.session_start_balance,
             "session_peak_balance": state.session_peak_balance,
             "session_realized_pnl": state.session_realized_pnl,
+            # Нээлттэй арилжааны symbol → стратеги холбоос. Үүнийг хадгалснаар
+            # restart-ын дараа позицуудыг "RECOVERED" биш, жинхэнэ стратегиэрээ
+            # таньж, статистикт нь зөв тооцох боломжтой болно.
+            "active_trades": state.active_trade_info,
             "saved_at": int(time.time()),
         }, indent=2), encoding="utf-8")
         tmp.replace(path)
@@ -1415,12 +1419,29 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
 # 🔄 RECOVER EXISTING POSITIONS
 # ==========================================================
 
+def load_saved_trades(max_age_sec=86400):
+    """Өмнөх ажиллагаанаас үлдсэн нээлттэй арилжааны бүртгэлийг уншина.
+
+    Хэт хуучирсан snapshot-д итгэхгүй — тэр хооронд позиц хаагдаад гараар
+    шинээр нээгдсэн байж болзошгүй тул стратегийг буруу оноох эрсдэлтэй.
+    """
+    saved = load_session_state()
+    if not saved:
+        return {}
+    if (time.time() - safe_float(saved.get("saved_at"), 0)) > max_age_sec:
+        return {}
+    trades = saved.get("active_trades")
+    return trades if isinstance(trades, dict) else {}
+
+
 def sync_existing_positions():
     # Алдаа гарвал main() барьж авна — "позиц байхгүй" гэж андуурч
     # хамгаалалтгүй позицуудыг орхихоос сэргийлнэ.
     positions = get_positions()
     if not positions:
         return
+
+    saved_trades = load_saved_trades()
 
     for pos in positions:
         symbol = pos["symbol"]
@@ -1432,6 +1453,19 @@ def sync_existing_positions():
         qty = abs(amount)
         entry = pos["entryPrice"]
 
+        # Хадгалсан бүртгэлээс жинхэнэ стратегийг сэргээх оролдлого. Тал (BUY/SELL)
+        # таарахгүй бол өөр арилжаа гэж үзээд RECOVERED хэвээр үлдээнэ.
+        saved = saved_trades.get(symbol)
+        if isinstance(saved, dict) and saved.get("side") == side and saved.get("strategy") in STRATEGY_NAMES:
+            strategy = saved["strategy"]
+            opened_at = safe_float(saved.get("opened_at"), time.time())
+            opened_at_ms = int(safe_float(saved.get("opened_at_ms"), opened_at * 1000))
+            print(f"🔄 RESTORED {symbol} → strategy={strategy} (хадгалсан бүртгэлээс)")
+        else:
+            strategy = "RECOVERED"
+            opened_at = time.time()
+            opened_at_ms = int(opened_at * 1000)
+
         algo_orders = send_signed_request("GET", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
         has_protection = False
         if isinstance(algo_orders, list):
@@ -1441,13 +1475,13 @@ def sync_existing_positions():
                     break
 
         state.active_trade_info[symbol] = {
-            "strategy": "RECOVERED",
+            "strategy": strategy,
             "side": side,
             "entry_price": entry,
             "quantity": qty,
             "position_side": position_side,
-            "opened_at": time.time(),
-            "opened_at_ms": int(time.time() * 1000),
+            "opened_at": opened_at,
+            "opened_at_ms": opened_at_ms,
             "entry_order_id": None,
             "sl_order_id": None,
             "tp_order_id": None,
@@ -1501,13 +1535,24 @@ def get_trade_realized_pnl(symbol, opened_at_ms):
 # 📈 STRATEGY PERFORMANCE
 # ==========================================================
 
+def record_realized_pnl(strategy, pnl):
+    """Хаагдсан арилжааны бодит ашгийг бүртгэнэ.
+
+    Сессийн ашгийг стратегиэс үл хамааран нэмнэ — өмнө нь энэ нь зөвхөн
+    update_strategy_performance дотор байсан тул танигдаагүй стратегитай
+    (RECOVERED гэх мэт) арилжааны ашиг тайланд огт тусдаггүй байв.
+    """
+    state.session_realized_pnl += pnl
+    update_strategy_performance(strategy, pnl)
+    save_session_state()
+
+
 def update_strategy_performance(strategy, pnl):
     if strategy not in state.strategy_stats:
         return
     stats = state.strategy_stats[strategy]
     stats["trades"] += 1
     stats["total_pnl"] += pnl
-    state.session_realized_pnl += pnl
     if pnl > 0:
         stats["wins"] += 1
         stats["consecutive_losses"] = 0
@@ -1532,14 +1577,13 @@ def update_strategy_performance(strategy, pnl):
     save_session_state()
 
 def finalize_trade(symbol, trade_data):
+    # RECOVERED позицын ашгийг ч заавал тооцно. Өмнө нь энд эрт `return 0.0`
+    # хийдэг байсан тул restart-ын дараах позицууд ашигтай хаагдсан ч
+    # "Session Realized $0.00" гэж худал харагдаж, хаагдсан мэдэгдэл ч ирдэггүй байв.
     strategy = trade_data.get("strategy", "UNKNOWN")
-    if strategy == "RECOVERED":
-        if symbol in state.dca_info:
-            del state.dca_info[symbol]
-        return 0.0
     opened_at_ms = trade_data.get("opened_at_ms", int(trade_data.get("opened_at", time.time()) * 1000))
     pnl = get_trade_realized_pnl(symbol, opened_at_ms)
-    update_strategy_performance(strategy, pnl)
+    record_realized_pnl(strategy, pnl)
     print(f"🔴 CLOSED {symbol} | Strategy={strategy} | PnL=${pnl:.2f}")
     send_telegram(
         format_block(
@@ -1805,7 +1849,7 @@ def execute_trades(selected_coins, total_balance):
             if symbol in state.dca_info:
                 del state.dca_info[symbol]
             pnl = get_trade_realized_pnl(symbol, opened_at_ms)
-            update_strategy_performance(strategy, pnl)
+            record_realized_pnl(strategy, pnl)
             send_telegram(format_block("EMERGENCY CLOSED", "⚠️", [("Symbol", symbol), ("PnL", money(pnl))]))
             continue
 
@@ -1822,6 +1866,9 @@ def execute_trades(selected_coins, total_balance):
             "tp_order_id": None,
             "recovered": False
         }
+        # Шинэ позицын стратегийг тэр дороо дискэнд бичнэ — үүний дараа шууд
+        # restart болсон ч энэ арилжаа "RECOVERED" болж танигдахгүй.
+        save_session_state()
         existing_symbols.add(symbol)
         current_margin_used += margin
 
@@ -2429,6 +2476,7 @@ def safety_recovery():
     if success:
         state.safety_lock = False
         state.active_trade_info.clear()
+        save_session_state()
         send_telegram(
             format_block(
                 "SAFETY RECOVERY SUCCESS",

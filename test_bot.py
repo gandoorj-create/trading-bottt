@@ -552,10 +552,34 @@ class TestUpdateStrategyPerformance:
         bot.update_strategy_performance("NOT_A_STRATEGY", -10.0)
         assert "NOT_A_STRATEGY" not in bot.state.strategy_stats
 
-    def test_session_pnl_accumulates(self):
+    def test_strategy_stats_only_no_session_pnl(self):
+        # Сессийн ашгийг record_realized_pnl хариуцна — энэ функц зөвхөн
+        # стратегийн статистикийг хөтөлнө
         bot.update_strategy_performance("RSI_STRATEGY", 10.0)
-        bot.update_strategy_performance("MACD_MOMENTUM", -4.0)
+
+        assert bot.state.strategy_stats["RSI_STRATEGY"]["total_pnl"] == 10.0
+        assert bot.state.session_realized_pnl == 0.0
+
+
+class TestRecordRealizedPnl:
+    def test_session_pnl_accumulates(self):
+        bot.record_realized_pnl("RSI_STRATEGY", 10.0)
+        bot.record_realized_pnl("MACD_MOMENTUM", -4.0)
+
         assert bot.state.session_realized_pnl == pytest.approx(6.0)
+
+    def test_unknown_strategy_still_counts_toward_session_pnl(self):
+        # RECOVERED зэрэг танигдаагүй стратегийн ашиг ч тайланд орох ёстой
+        bot.record_realized_pnl("RECOVERED", 17.80)
+
+        assert bot.state.session_realized_pnl == pytest.approx(17.80)
+        assert "RECOVERED" not in bot.state.strategy_stats
+
+    def test_known_strategy_updates_both(self):
+        bot.record_realized_pnl("RSI_STRATEGY", 25.0)
+
+        assert bot.state.session_realized_pnl == pytest.approx(25.0)
+        assert bot.state.strategy_stats["RSI_STRATEGY"]["wins"] == 1
 
 
 class TestStrategyCooldowns:
@@ -1399,3 +1423,141 @@ class TestOrderPathSurvivesApiFailure:
         assert len(order_spy) == 1
         assert protections == ["BTCUSDT"]
         assert "BTCUSDT" in bot.state.active_trade_info
+
+
+# ----------------------------------------------------------------
+# RECOVERED позиц: ашиг нь бүртгэгдэх, стратеги нь сэргэх
+#
+# Restart-ын дараа sync_existing_positions позицуудыг авдаг. Өмнө нь тэдгээр нь
+# "RECOVERED" болж, finalize_trade эрт `return 0.0` хийдэг байсан тул ашиг нь
+# Session Realized-д огт тусахгүй, хаагдсан мэдэгдэл ч ирдэггүй байв.
+# ----------------------------------------------------------------
+
+class TestRecoveredTradeFinalization:
+    def test_recovered_pnl_counts_toward_session(self, monkeypatch):
+        monkeypatch.setattr(bot, "get_trade_realized_pnl", lambda symbol, opened_at_ms: 17.80)
+
+        pnl = bot.finalize_trade("BNBUSDT", _trade_info(strategy="RECOVERED"))
+
+        assert pnl == pytest.approx(17.80)
+        assert bot.state.session_realized_pnl == pytest.approx(17.80)
+
+    def test_recovered_close_sends_notification(self, monkeypatch, telegram_messages):
+        monkeypatch.setattr(bot, "get_trade_realized_pnl", lambda symbol, opened_at_ms: 17.80)
+
+        bot.finalize_trade("BNBUSDT", _trade_info(strategy="RECOVERED"))
+
+        assert any("ПОЗИЦ ХААГДЛАА" in m for m in telegram_messages)
+
+    def test_recovered_does_not_pollute_strategy_stats(self, monkeypatch):
+        monkeypatch.setattr(bot, "get_trade_realized_pnl", lambda symbol, opened_at_ms: 17.80)
+
+        bot.finalize_trade("BNBUSDT", _trade_info(strategy="RECOVERED"))
+
+        assert "RECOVERED" not in bot.state.strategy_stats
+        assert all(s["trades"] == 0 for s in bot.state.strategy_stats.values())
+
+    def test_known_strategy_close_updates_stats(self, monkeypatch):
+        monkeypatch.setattr(bot, "get_trade_realized_pnl", lambda symbol, opened_at_ms: 40.0)
+
+        bot.finalize_trade("BTCUSDT", _trade_info(strategy="RSI_STRATEGY"))
+
+        assert bot.state.strategy_stats["RSI_STRATEGY"]["trades"] == 1
+        assert bot.state.session_realized_pnl == pytest.approx(40.0)
+
+    def test_dca_info_cleared_on_close(self, monkeypatch):
+        monkeypatch.setattr(bot, "get_trade_realized_pnl", lambda symbol, opened_at_ms: 5.0)
+        bot.state.dca_info["BNBUSDT"] = {"level": 1}
+
+        bot.finalize_trade("BNBUSDT", _trade_info(strategy="RECOVERED"))
+
+        assert "BNBUSDT" not in bot.state.dca_info
+
+
+class TestStrategyRestoreAcrossRestart:
+    """Нээлттэй арилжааны symbol → стратеги холбоос дискэнд хадгалагдаж,
+    дахин асахад сэргэх ёстой."""
+
+    def _live_position(self, monkeypatch, symbol="BTCUSDT", amt=1.0):
+        monkeypatch.setattr(bot, "get_positions", lambda: [_position(symbol, amt=amt)])
+        monkeypatch.setattr(bot, "send_signed_request", lambda *a, **kw: [])
+        monkeypatch.setattr(bot, "rebuild_protection_orders",
+                            lambda symbol, side, qty, entry, pos_side: (True, 103.0, 101.0))
+
+    def test_saved_trade_is_written_to_disk(self):
+        bot.state.active_trade_info["BTCUSDT"] = _trade_info(strategy="MACD_MOMENTUM")
+        bot.save_session_state()
+
+        saved = bot.load_session_state()
+
+        assert saved["active_trades"]["BTCUSDT"]["strategy"] == "MACD_MOMENTUM"
+
+    def test_strategy_is_restored_instead_of_recovered(self, monkeypatch):
+        bot.state.active_trade_info["BTCUSDT"] = _trade_info(strategy="MACD_MOMENTUM", side="BUY")
+        bot.save_session_state()
+        bot.state.active_trade_info = {}  # restart дуурайлгах
+        self._live_position(monkeypatch)
+
+        bot.sync_existing_positions()
+
+        assert bot.state.active_trade_info["BTCUSDT"]["strategy"] == "MACD_MOMENTUM"
+
+    def test_original_open_time_is_restored(self, monkeypatch):
+        info = _trade_info(strategy="MACD_MOMENTUM", side="BUY")
+        bot.state.active_trade_info["BTCUSDT"] = info
+        bot.save_session_state()
+        bot.state.active_trade_info = {}
+        self._live_position(monkeypatch)
+
+        bot.sync_existing_positions()
+
+        # opened_at_ms нь realized PnL-ийг хаанаас тоолохыг тодорхойлдог
+        assert bot.state.active_trade_info["BTCUSDT"]["opened_at_ms"] == info["opened_at_ms"]
+
+    def test_side_mismatch_falls_back_to_recovered(self, monkeypatch):
+        # Хадгалсан бүртгэл SELL, биржид байгаа нь BUY — өөр арилжаа гэж үзнэ
+        bot.state.active_trade_info["BTCUSDT"] = _trade_info(strategy="MACD_MOMENTUM", side="SELL")
+        bot.save_session_state()
+        bot.state.active_trade_info = {}
+        self._live_position(monkeypatch, amt=1.0)  # эерэг тоо = BUY
+
+        bot.sync_existing_positions()
+
+        assert bot.state.active_trade_info["BTCUSDT"]["strategy"] == "RECOVERED"
+
+    def test_no_saved_record_falls_back_to_recovered(self, monkeypatch):
+        self._live_position(monkeypatch)
+
+        bot.sync_existing_positions()
+
+        assert bot.state.active_trade_info["BTCUSDT"]["strategy"] == "RECOVERED"
+
+    def test_stale_snapshot_is_ignored(self, monkeypatch, isolated_state_files):
+        stale = {
+            "session_peak_balance": 0.0,
+            "saved_at": int(bot.time.time()) - 200_000,  # 2 хоногийн өмнөх
+            "active_trades": {"BTCUSDT": _trade_info(strategy="MACD_MOMENTUM", side="BUY")},
+        }
+        (isolated_state_files / "session_state.json").write_text(json.dumps(stale))
+        self._live_position(monkeypatch)
+
+        bot.sync_existing_positions()
+
+        assert bot.state.active_trade_info["BTCUSDT"]["strategy"] == "RECOVERED"
+
+    def test_unknown_strategy_name_is_not_trusted(self, monkeypatch):
+        bot.state.active_trade_info["BTCUSDT"] = _trade_info(strategy="HACKED_STRATEGY", side="BUY")
+        bot.save_session_state()
+        bot.state.active_trade_info = {}
+        self._live_position(monkeypatch)
+
+        bot.sync_existing_positions()
+
+        assert bot.state.active_trade_info["BTCUSDT"]["strategy"] == "RECOVERED"
+
+    def test_new_position_is_persisted_immediately(self, tradeable):
+        bot.execute_trades([_coin()], total_balance=1000.0)
+
+        saved = bot.load_session_state()
+
+        assert saved["active_trades"]["BTCUSDT"]["strategy"] == "RSI_STRATEGY"
