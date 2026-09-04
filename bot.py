@@ -757,7 +757,9 @@ def calculate_supertrend(df, period=10, multiplier=3):
     
     supertrend = pd.Series(index=df.index, dtype=float)
     direction = pd.Series(index=df.index, dtype=int)
-    
+    direction.iloc[0] = 1
+    supertrend.iloc[0] = lower_band.iloc[0]
+
     for i in range(1, len(df)):
         if pd.isna(close.iloc[i]) or pd.isna(upper_band.iloc[i]) or pd.isna(lower_band.iloc[i]):
             direction.iloc[i] = direction.iloc[i-1] if i>1 else 1
@@ -775,9 +777,7 @@ def calculate_supertrend(df, period=10, multiplier=3):
                 upper_band.iloc[i] = min(upper_band.iloc[i], upper_band.iloc[i-1])
         
         supertrend.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == 1 else upper_band.iloc[i]
-    
-    direction.iloc[0] = 1
-    supertrend.iloc[0] = lower_band.iloc[0]
+
     return supertrend, direction
 
 def calculate_vwap(df):
