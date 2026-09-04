@@ -41,8 +41,9 @@ from state import STRATEGY_NAMES, state
 # ==========================================================
 # 📦 STATE PERSISTENCE
 # ==========================================================
-STRATEGY_STATE_FILE = os.path.join(os.path.dirname(__file__), "strategy_state.json")
-SESSION_STATE_FILE = os.path.join(os.path.dirname(__file__), "session_state.json")
+# STRATEGY_STATE_FILE / SESSION_STATE_FILE нь settings.py-д STATE_DIR дээр
+# тулгуурлаж тодорхойлогддог. Өмнө нь энд дахин тодорхойлдог байсан тул
+# config.json дахь тохиргоо болон STATE_DIR хоёулаа үл хэрэгсэгддэг байв.
 BACKTEST_FEE_RATE = 0.0004
 BACKTEST_SLIPPAGE_RATE = 0.0005
 
@@ -56,6 +57,42 @@ FUNDING_SENTIMENT_THRESHOLD = 0.0005
 # ==========================================================
 
 
+
+
+def check_state_storage():
+    """State директор бичигдэх боломжтой эсэхийг эхлэхэд шалгана.
+
+    STATE_DIR тохируулаагүй бол файлууд контейнерийн түр зуурын дискэнд бичигдэж,
+    redeploy болгонд алга болно — drawdown-ы оргил утга тэглэгдэж, нээлттэй
+    арилжаанууд стратегиэ алдана. Тиймээс намуухан бүтэлгүйтэхийн оронд
+    эхлэхдээ тодорхой хэлнэ.
+    """
+    try:
+        Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
+        probe = Path(STATE_DIR) / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except Exception as e:
+        print(f"🚨 STATE DIR бичигдэхгүй байна ({STATE_DIR}): {e}")
+        send_telegram(format_block("STATE STORAGE АЛДАА", "🚨", [
+            ("Директор", str(STATE_DIR)),
+            ("Error", str(e)[:200]),
+            ("Үр дагавар", "Drawdown peak болон арилжааны стратеги хадгалагдахгүй"),
+        ]))
+        return False
+
+    if STATE_DIR_IS_PERSISTENT:
+        print(f"💾 State хадгалалт: {STATE_DIR} (persistent volume)")
+        return True
+
+    print(f"⚠️ State хадгалалт: {STATE_DIR} — түр зуурын диск!")
+    print("   Railway дээр volume mount хийж STATE_DIR-ийг заана уу (жишээ нь /data).")
+    send_telegram(format_block("STATE ХАДГАЛАЛТ ТҮР ЗУУРЫН", "⚠️", [
+        ("Директор", str(STATE_DIR)),
+        ("Эрсдэл", "Redeploy хийхэд drawdown peak тэглэгдэж, стратеги алга болно"),
+        ("Шийдэл", "Railway volume mount + STATE_DIR тохируулах"),
+    ]))
+    return True
 
 
 def load_strategy_state():
@@ -2506,6 +2543,8 @@ def main():
     except Exception as e:
         print(f"❌ CONFIG ERROR: {e}")
         return
+
+    check_state_storage()
 
     sync_server_time()
 

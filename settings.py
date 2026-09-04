@@ -17,6 +17,14 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TELEGRAM_API_ROOT = os.environ.get("TELEGRAM_API_ROOT", "https://api.telegram.org")
 
+# ---- State хадгалах директор ----
+# Railway дээр deploy болгонд контейнер шинээр үүсдэг тул кодын хавтас руу
+# бичсэн файл алга болдог. Volume mount хийгээд STATE_DIR-ийг түүн рүү
+# (жишээ нь /data) заавал бот restart хийсний дараа ч drawdown-ы оргил утга,
+# нээлттэй арилжааны стратегиэ санана.
+STATE_DIR = os.environ.get("STATE_DIR") or os.path.dirname(__file__)
+STATE_DIR_IS_PERSISTENT = bool(os.environ.get("STATE_DIR"))
+
 # ---- Тохиргоо (config.json) ----
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
@@ -82,7 +90,8 @@ BACKTEST_DAYS = _cfg.get("backtest_days", 30)
 BACKTEST_INTERVAL = _cfg.get("backtest_interval", "1h")
 BACKTEST_FEE_RATE = _cfg.get("backtest_fee_rate", 0.0004)
 BACKTEST_SLIPPAGE_RATE = _cfg.get("backtest_slippage_rate", 0.0002)
-STRATEGY_STATE_FILE = os.path.join(os.path.dirname(__file__), _cfg.get("strategy_state_file", "strategy_state.json"))
+STRATEGY_STATE_FILE = os.path.join(STATE_DIR, _cfg.get("strategy_state_file", "strategy_state.json"))
+SESSION_STATE_FILE = os.path.join(STATE_DIR, _cfg.get("session_state_file", "session_state.json"))
 
 # ---- ШИНЭ: CHOP, Supertrend, MTF, VWAP, Funding Rate ----
 CHOP_PERIOD = _cfg.get("chop_period", 14)

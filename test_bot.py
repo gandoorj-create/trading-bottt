@@ -1561,3 +1561,47 @@ class TestStrategyRestoreAcrossRestart:
         saved = bot.load_session_state()
 
         assert saved["active_trades"]["BTCUSDT"]["strategy"] == "RSI_STRATEGY"
+
+
+# ----------------------------------------------------------------
+# State хадгалах директор (Railway volume)
+# ----------------------------------------------------------------
+
+class TestStateStorageCheck:
+    def test_creates_missing_directory(self, monkeypatch, tmp_path):
+        target = tmp_path / "volume" / "nested"
+        monkeypatch.setattr(bot, "STATE_DIR", str(target))
+        monkeypatch.setattr(bot, "STATE_DIR_IS_PERSISTENT", True)
+
+        assert bot.check_state_storage() is True
+        assert target.is_dir()
+
+    def test_write_probe_is_cleaned_up(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bot, "STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(bot, "STATE_DIR_IS_PERSISTENT", True)
+
+        bot.check_state_storage()
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_persistent_dir_sends_no_warning(self, monkeypatch, tmp_path, telegram_messages):
+        monkeypatch.setattr(bot, "STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(bot, "STATE_DIR_IS_PERSISTENT", True)
+
+        bot.check_state_storage()
+
+        assert telegram_messages == []
+
+    def test_ephemeral_dir_warns(self, monkeypatch, tmp_path, telegram_messages):
+        monkeypatch.setattr(bot, "STATE_DIR", str(tmp_path))
+        monkeypatch.setattr(bot, "STATE_DIR_IS_PERSISTENT", False)
+
+        assert bot.check_state_storage() is True
+        assert any("ТҮР ЗУУРЫН" in m for m in telegram_messages)
+
+    def test_unwritable_dir_reports_failure(self, monkeypatch, telegram_messages):
+        monkeypatch.setattr(bot, "STATE_DIR", "/proc/definitely-not-writable")
+        monkeypatch.setattr(bot, "STATE_DIR_IS_PERSISTENT", True)
+
+        assert bot.check_state_storage() is False
+        assert any("STATE STORAGE АЛДАА" in m for m in telegram_messages)

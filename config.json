@@ -58,6 +58,7 @@
   "backtest_fee_rate": 0.0004,
   "backtest_slippage_rate": 0.0002,
   "strategy_state_file": "strategy_state.json",
+  "session_state_file": "session_state.json",
 
   "chop_period": 14,
   "supertrend_period": 10,
