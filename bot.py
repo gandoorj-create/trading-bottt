@@ -36,6 +36,7 @@ except ImportError:
 
 from telegram_format import format_block, format_section, money
 from settings import *
+from state import STRATEGY_NAMES, state
 
 # ==========================================================
 # 📦 STATE PERSISTENCE
@@ -54,31 +55,10 @@ FUNDING_SENTIMENT_THRESHOLD = 0.0005
 # 🧠 STRATEGY SETTINGS
 # ==========================================================
 
-STRATEGY_NAMES = [
-    "SUPERTREND",
-    "MACD_MOMENTUM",
-    "GRID_TRADING",
-    "BOLLINGER_MEAN_REVERSION",
-    "RSI_STRATEGY",
-    "TREND_FOLLOWING"
-]
 
-strategy_stats = {
-    strategy: {
-        "trades": 0,
-        "wins": 0,
-        "losses": 0,
-        "total_pnl": 0.0,
-        "consecutive_losses": 0,
-        "active": True,
-        "paused_cycles": 0
-    }
-    for strategy in STRATEGY_NAMES
-}
 
 
 def load_strategy_state():
-    global strategy_stats
     try:
         path = Path(STRATEGY_STATE_FILE)
         if not path.exists():
@@ -90,7 +70,7 @@ def load_strategy_state():
             saved = data.get(strategy)
             if not isinstance(saved, dict):
                 continue
-            current = strategy_stats[strategy]
+            current = state.strategy_stats[strategy]
             for key in ("trades", "wins", "losses", "total_pnl", "consecutive_losses", "active", "paused_cycles"):
                 if key in saved:
                     current[key] = saved[key]
@@ -102,7 +82,7 @@ def save_strategy_state():
     try:
         path = Path(STRATEGY_STATE_FILE)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(strategy_stats, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(state.strategy_stats, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
     except Exception as e:
         print(f"⚠️ Strategy state save failed: {e}")
@@ -125,9 +105,9 @@ def save_session_state():
         path = Path(SESSION_STATE_FILE)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(json.dumps({
-            "session_start_balance": session_start_balance,
-            "session_peak_balance": session_peak_balance,
-            "session_realized_pnl": session_realized_pnl,
+            "session_start_balance": state.session_start_balance,
+            "session_peak_balance": state.session_peak_balance,
+            "session_realized_pnl": state.session_realized_pnl,
             "saved_at": int(time.time()),
         }, indent=2), encoding="utf-8")
         tmp.replace(path)
@@ -138,45 +118,26 @@ def save_session_state():
 # 💰 SESSION STATE
 # ==========================================================
 
-session_start_balance = 0.0
-session_realized_pnl = 0.0
-cycle_start_balance = 0.0
-cycle_start_time = time.time()
-last_cycle_balance = 0.0
-session_peak_balance = 0.0
-drawdown_lock_active = False
-drawdown_halt = False
 
 
 # ==========================================================
 # 💼 ACTIVE POSITIONS
 # ==========================================================
 
-active_trade_info = {}
 
 
 # ==========================================================
 # 🧮 DCA STATE
 # ==========================================================
 
-dca_info = {}
 
 
 # ==========================================================
 # ⚙️ CACHE
 # ==========================================================
 
-leverage_cache = {}
-_symbol_info_cache = {}
-last_telegram_report_time = 0
-server_time_offset_ms = 0
-position_mode_cache = None
-safety_lock = False
-unprotected_symbols = set()
 
 # ---- Correlation Cache ----
-_correlation_cache = {}
-_correlation_cache_time = {}
 
 
 # ==========================================================
@@ -225,7 +186,6 @@ def _rate_limit_wait(response, attempt):
 # ==========================================================
 
 def sync_server_time():
-    global server_time_offset_ms
     try:
         local_before = int(time.time() * 1000)
         response = requests.get(f"{BASE_URL}/fapi/v1/time", timeout=REQUEST_TIMEOUT)
@@ -233,15 +193,15 @@ def sync_server_time():
         data = response.json()
         server_time = int(data.get("serverTime", local_after))
         local_mid = (local_before + local_after) // 2
-        server_time_offset_ms = server_time - local_mid
-        print(f"🕐 Server time offset: {server_time_offset_ms} ms")
+        state.server_time_offset_ms = server_time - local_mid
+        print(f"🕐 Server time offset: {state.server_time_offset_ms} ms")
         return True
     except Exception as e:
         print(f"⚠️ Server time sync failed: {e}")
         return False
 
 def current_timestamp_ms():
-    return int(time.time() * 1000) + server_time_offset_ms
+    return int(time.time() * 1000) + state.server_time_offset_ms
 
 
 # ==========================================================
@@ -371,7 +331,7 @@ def send_public_request(endpoint, params=None, _rl_attempt=0):
 # ==========================================================
 
 def load_exchange_info():
-    if _symbol_info_cache:
+    if state.symbol_info_cache:
         return
     data = send_public_request("/fapi/v1/exchangeInfo")
     if not isinstance(data, dict):
@@ -397,12 +357,12 @@ def load_exchange_info():
                 info["tickSize"] = safe_float(f.get("tickSize"))
             elif filter_type in ("MIN_NOTIONAL", "NOTIONAL"):
                 info["minNotional"] = safe_float(f.get("notional", f.get("minNotional", 0)))
-        _symbol_info_cache[symbol] = info
+        state.symbol_info_cache[symbol] = info
 
 def get_symbol_info(symbol):
-    if symbol not in _symbol_info_cache:
+    if symbol not in state.symbol_info_cache:
         load_exchange_info()
-    return _symbol_info_cache.get(symbol)
+    return state.symbol_info_cache.get(symbol)
 
 def decimals_from_step(step):
     if not step or step <= 0:
@@ -473,15 +433,14 @@ def get_usdt_balance():
     return 0.0
 
 def get_position_mode():
-    global position_mode_cache
-    if position_mode_cache is not None:
-        return position_mode_cache
+    if state.position_mode_cache is not None:
+        return state.position_mode_cache
     data = send_signed_request("GET", "/fapi/v1/positionSide/dual")
     if is_api_error(data):
         raise RuntimeError(f"Cannot get position mode: {data}")
-    position_mode_cache = bool(data.get("dualSidePosition", False))
-    print("📌 Position mode:", "HEDGE" if position_mode_cache else "ONE-WAY")
-    return position_mode_cache
+    state.position_mode_cache = bool(data.get("dualSidePosition", False))
+    print("📌 Position mode:", "HEDGE" if state.position_mode_cache else "ONE-WAY")
+    return state.position_mode_cache
 
 
 # ==========================================================
@@ -1028,15 +987,14 @@ def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slop
 # ==========================================================
 
 def calculate_correlation_cached(symbol1, symbol2, lookback=50):
-    global _correlation_cache, _correlation_cache_time
     key = "_".join(sorted((symbol1, symbol2)))
     now = time.time()
-    if key in _correlation_cache and (now - _correlation_cache_time.get(key, 0)) < CORRELATION_CACHE_TTL:
-        return _correlation_cache[key]
+    if key in state.correlation_cache and (now - state.correlation_cache_time.get(key, 0)) < CORRELATION_CACHE_TTL:
+        return state.correlation_cache[key]
     
     corr = calculate_correlation(symbol1, symbol2, lookback)
-    _correlation_cache[key] = corr
-    _correlation_cache_time[key] = now
+    state.correlation_cache[key] = corr
+    state.correlation_cache_time[key] = now
     return corr
 
 def calculate_correlation(symbol1, symbol2, lookback=50):
@@ -1129,7 +1087,7 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
 
         strategy_results = {}
         for strategy in STRATEGY_NAMES:
-            if not strategy_stats[strategy]["active"]:
+            if not state.strategy_stats[strategy]["active"]:
                 continue
             score = calculate_strategy_score(
                 strategy, adx, rsi, atr_pct, volume_ratio, 
@@ -1203,7 +1161,7 @@ def screen_coins():
 
     strategy_candidates = []
     for strategy in STRATEGY_NAMES:
-        if not strategy_stats[strategy]["active"]:
+        if not state.strategy_stats[strategy]["active"]:
             continue
         candidates = []
         for coin in analyses:
@@ -1263,7 +1221,7 @@ def screen_coins():
     if current_margin_used >= max_margin * 0.95:
         skipped_reasons.append(f"💳 Маржин хязгаарт хүрсэн (ашигласан: {current_margin_used:.2f} / хязгаар: {max_margin:.2f} USDT)")
 
-    inactive_strategies = [s for s, stats in strategy_stats.items() if not stats["active"]]
+    inactive_strategies = [s for s, stats in state.strategy_stats.items() if not stats["active"]]
     if inactive_strategies:
         skipped_reasons.append(f"⏸️ Идэвхгүй стратеги: {', '.join(inactive_strategies)}")
 
@@ -1449,14 +1407,13 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
 # ==========================================================
 
 def sync_existing_positions():
-    global dca_info, unprotected_symbols
     positions = get_positions()
     if not positions:
         return
 
     for pos in positions:
         symbol = pos["symbol"]
-        if symbol in active_trade_info:
+        if symbol in state.active_trade_info:
             continue
         amount = pos["positionAmt"]
         side = "BUY" if amount > 0 else "SELL"
@@ -1472,7 +1429,7 @@ def sync_existing_positions():
                     has_protection = True
                     break
 
-        active_trade_info[symbol] = {
+        state.active_trade_info[symbol] = {
             "strategy": "RECOVERED",
             "side": side,
             "entry_price": entry,
@@ -1486,7 +1443,7 @@ def sync_existing_positions():
             "recovered": True
         }
 
-        dca_info[symbol] = {
+        state.dca_info[symbol] = {
             "level": 0,
             "avg_price": entry,
             "base_qty": qty,
@@ -1497,7 +1454,7 @@ def sync_existing_positions():
             print(f"🔄 RECOVERED {symbol} WITHOUT protection – rebuilding...")
             success, _, _ = rebuild_protection_orders(symbol, side, qty, entry, position_side)
             if not success:
-                unprotected_symbols.add(symbol)
+                state.unprotected_symbols.add(symbol)
                 send_telegram(format_block("RECOVERED POSITION WITHOUT PROTECTION", "🚨", [("Symbol", symbol)]))
         else:
             print(f"🔄 RECOVERED POSITION: {symbol} (protected)")
@@ -1534,13 +1491,12 @@ def get_trade_realized_pnl(symbol, opened_at_ms):
 # ==========================================================
 
 def update_strategy_performance(strategy, pnl):
-    global session_realized_pnl
-    if strategy not in strategy_stats:
+    if strategy not in state.strategy_stats:
         return
-    stats = strategy_stats[strategy]
+    stats = state.strategy_stats[strategy]
     stats["trades"] += 1
     stats["total_pnl"] += pnl
-    session_realized_pnl += pnl
+    state.session_realized_pnl += pnl
     if pnl > 0:
         stats["wins"] += 1
         stats["consecutive_losses"] = 0
@@ -1565,11 +1521,10 @@ def update_strategy_performance(strategy, pnl):
     save_session_state()
 
 def finalize_trade(symbol, trade_data):
-    global dca_info
     strategy = trade_data.get("strategy", "UNKNOWN")
     if strategy == "RECOVERED":
-        if symbol in dca_info:
-            del dca_info[symbol]
+        if symbol in state.dca_info:
+            del state.dca_info[symbol]
         return 0.0
     opened_at_ms = trade_data.get("opened_at_ms", int(trade_data.get("opened_at", time.time()) * 1000))
     pnl = get_trade_realized_pnl(symbol, opened_at_ms)
@@ -1586,8 +1541,8 @@ def finalize_trade(symbol, trade_data):
             ]
         )
     )
-    if symbol in dca_info:
-        del dca_info[symbol]
+    if symbol in state.dca_info:
+        del state.dca_info[symbol]
     return pnl
 
 
@@ -1596,17 +1551,17 @@ def finalize_trade(symbol, trade_data):
 # ==========================================================
 
 def get_actual_leverage(symbol):
-    if symbol in leverage_cache:
-        return leverage_cache[symbol]
+    if symbol in state.leverage_cache:
+        return state.leverage_cache[symbol]
     result = send_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if is_api_error(result) or not isinstance(result, list) or not result:
         return LEVERAGE
     lev = int(safe_float(result[0].get("leverage", LEVERAGE), LEVERAGE))
-    leverage_cache[symbol] = lev
+    state.leverage_cache[symbol] = lev
     return lev
 
 def ensure_leverage(symbol, leverage=LEVERAGE):
-    if leverage_cache.get(symbol) == leverage:
+    if state.leverage_cache.get(symbol) == leverage:
         return True
     result = send_signed_request("POST", "/fapi/v1/leverage", {
         "symbol": symbol,
@@ -1614,11 +1569,11 @@ def ensure_leverage(symbol, leverage=LEVERAGE):
     })
     if is_api_error(result):
         if safe_float(result.get("code"), 0) == -4141:
-            leverage_cache[symbol] = leverage
+            state.leverage_cache[symbol] = leverage
             return True
         print(f"❌ {symbol}: leverage error {result}")
         return False
-    leverage_cache[symbol] = leverage
+    state.leverage_cache[symbol] = leverage
     return True
 
 
@@ -1685,7 +1640,7 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
             print(f"⚠️ {symbol}: trailing stop not placed ({trailing}) — emergency SL still active")
             activation_price = None
 
-    unprotected_symbols.discard(symbol)
+    state.unprotected_symbols.discard(symbol)
     return True, tp_price, activation_price
 
 
@@ -1694,8 +1649,7 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
 # ==========================================================
 
 def execute_trades(selected_coins, total_balance):
-    global safety_lock, dca_info, unprotected_symbols
-    if safety_lock:
+    if state.safety_lock:
         print("🔒 SAFETY LOCK: new trades disabled")
         return
     if not selected_coins:
@@ -1710,7 +1664,7 @@ def execute_trades(selected_coins, total_balance):
     max_margin = total_balance * MAX_TOTAL_MARGIN_USAGE
 
     for coin in selected_coins:
-        if safety_lock:
+        if state.safety_lock:
             return
         symbol = coin["symbol"]
         strategy = coin["strategy"]
@@ -1725,7 +1679,7 @@ def execute_trades(selected_coins, total_balance):
             return
 
         margin = total_balance * TRADE_ALLOCATION
-        if symbol in unprotected_symbols:
+        if symbol in state.unprotected_symbols:
             print(f"⏸️ {symbol}: unprotected, skip new trade")
             continue
 
@@ -1804,7 +1758,7 @@ def execute_trades(selected_coins, total_balance):
             entry_price = price
         opened_at_ms = current_timestamp_ms()
 
-        dca_info[symbol] = {
+        state.dca_info[symbol] = {
             "level": 0,
             "avg_price": entry_price,
             "base_qty": actual_quantity,
@@ -1816,7 +1770,7 @@ def execute_trades(selected_coins, total_balance):
             send_telegram(format_block("PROTECTION FAILED", "🚨", [("Symbol", symbol), ("Action", "Closing position")]))
             close_result = place_market_order(symbol, close_side, actual_quantity, reduce_only=True, position_side=actual_position_side)
             if is_api_error(close_result):
-                safety_lock = True
+                state.safety_lock = True
                 send_telegram(format_block("CRITICAL CLOSE FAILED", "🚨", [("Symbol", symbol)]))
                 continue
             try:
@@ -1824,14 +1778,14 @@ def execute_trades(selected_coins, total_balance):
             except Exception:
                 pass
             existing_symbols.discard(symbol)
-            if symbol in dca_info:
-                del dca_info[symbol]
+            if symbol in state.dca_info:
+                del state.dca_info[symbol]
             pnl = get_trade_realized_pnl(symbol, opened_at_ms)
             update_strategy_performance(strategy, pnl)
             send_telegram(format_block("EMERGENCY CLOSED", "⚠️", [("Symbol", symbol), ("PnL", money(pnl))]))
             continue
 
-        active_trade_info[symbol] = {
+        state.active_trade_info[symbol] = {
             "strategy": strategy,
             "side": signal,
             "entry_price": entry_price,
@@ -1960,8 +1914,7 @@ def close_all_positions_and_verify():
 # ==========================================================
 
 def handle_target_reached(total_unrealized):
-    global safety_lock
-    safety_lock = True
+    state.safety_lock = True
     balance_before = get_usdt_balance()
     send_telegram(
         format_block(
@@ -1993,17 +1946,17 @@ def handle_target_reached(total_unrealized):
     balance_after = get_usdt_balance()
     balance_delta = balance_after - balance_before
 
-    target_symbols = list(active_trade_info.keys())
+    target_symbols = list(state.active_trade_info.keys())
     target_realized = 0.0
     for symbol in target_symbols:
-        trade_data = active_trade_info.pop(symbol, None)
+        trade_data = state.active_trade_info.pop(symbol, None)
         if not trade_data:
             continue
         target_realized += finalize_trade(symbol, trade_data)
 
     final_positions = get_positions()
     if final_positions:
-        safety_lock = True
+        state.safety_lock = True
         send_telegram(
             format_block(
                 "FINAL SAFETY CHECK FAILED",
@@ -2061,7 +2014,6 @@ def target_cooldown():
 # ==========================================================
 
 def check_drawdown_circuit_breaker():
-    global safety_lock, session_peak_balance, drawdown_lock_active, drawdown_halt
 
     if not MAX_SESSION_DRAWDOWN_PCT or MAX_SESSION_DRAWDOWN_PCT <= 0:
         return
@@ -2070,28 +2022,28 @@ def check_drawdown_circuit_breaker():
     if balance <= 0:
         return
 
-    if balance > session_peak_balance:
-        session_peak_balance = balance
-        if drawdown_lock_active:
-            drawdown_lock_active = False
+    if balance > state.session_peak_balance:
+        state.session_peak_balance = balance
+        if state.drawdown_lock_active:
+            state.drawdown_lock_active = False
         save_session_state()
         return
 
-    if session_peak_balance <= 0:
+    if state.session_peak_balance <= 0:
         return
 
-    drawdown_pct = (session_peak_balance - balance) / session_peak_balance * 100
-    if drawdown_pct >= MAX_SESSION_DRAWDOWN_PCT and not safety_lock:
-        safety_lock = True
-        drawdown_lock_active = True
-        drawdown_halt = True
+    drawdown_pct = (state.session_peak_balance - balance) / state.session_peak_balance * 100
+    if drawdown_pct >= MAX_SESSION_DRAWDOWN_PCT and not state.safety_lock:
+        state.safety_lock = True
+        state.drawdown_lock_active = True
+        state.drawdown_halt = True
         print(f"🚨 MAX DRAWDOWN HIT: {drawdown_pct:.2f}% (limit {MAX_SESSION_DRAWDOWN_PCT}%) — HARD STOP")
         send_telegram(
             format_block(
                 "MAX DRAWDOWN CIRCUIT BREAKER",
                 "🚨",
                 [
-                    ("Peak Balance", f"${session_peak_balance:,.2f}"),
+                    ("Peak Balance", f"${state.session_peak_balance:,.2f}"),
                     ("Current Balance", f"${balance:,.2f}"),
                     ("Drawdown", f"{drawdown_pct:.2f}% (limit {MAX_SESSION_DRAWDOWN_PCT:.1f}%)"),
                     ("", ""),
@@ -2127,56 +2079,50 @@ def get_next_cpi_event():
         print(f"⚠️ News calendar error: {e}")
     return None
 
-news_mode_active = False
-news_trade_done = False
-last_news_check = None
-next_news_time = None
 
 def check_news_status():
     # News mode ONLY toggles news_mode_active. The main loop treats that as
     # "monitor open positions, don't open new technical trades" — it must NOT
     # touch safety_lock, because the main loop's safety_lock branch runs
     # safety_recovery() which force-closes every open position.
-    global news_mode_active, news_trade_done, next_news_time, last_news_check
     if not NEWS_ENABLED:
         return
 
     now = datetime.now(pytz.UTC)
-    stale = (not isinstance(last_news_check, datetime)) or (now - last_news_check).total_seconds() > 3600
-    if not next_news_time or stale:
-        next_news_time = get_next_cpi_event()
-        last_news_check = now
+    stale = (not isinstance(state.last_news_check, datetime)) or (now - state.last_news_check).total_seconds() > 3600
+    if not state.next_news_time or stale:
+        state.next_news_time = get_next_cpi_event()
+        state.last_news_check = now
 
-    if not next_news_time:
+    if not state.next_news_time:
         return
 
-    diff = (next_news_time - now).total_seconds() / 60
+    diff = (state.next_news_time - now).total_seconds() / 60
 
     if 0 < diff < NEWS_PAUSE_BEFORE:
-        news_mode_active = True
-        news_trade_done = False
+        state.news_mode_active = True
+        state.news_trade_done = False
         print(f"📰 News approaching in {diff:.0f} min. Pausing new technical trades.")
         return
 
     if -NEWS_WAIT_AFTER < diff < 0:
-        news_mode_active = True
+        state.news_mode_active = True
         print(f"📰 News just released. Waiting {NEWS_WAIT_AFTER} min for stability...")
         return
 
-    if diff <= -NEWS_WAIT_AFTER and news_mode_active and not news_trade_done:
+    if diff <= -NEWS_WAIT_AFTER and state.news_mode_active and not state.news_trade_done:
         print("📰 News cooldown finished. Executing post-news trade...")
         execute_post_news_trade()
-        news_trade_done = True
-        news_mode_active = False
+        state.news_trade_done = True
+        state.news_mode_active = False
         return
 
-    if diff <= - (NEWS_WAIT_AFTER + 30) and news_mode_active:
-        news_mode_active = False
+    if diff <= - (NEWS_WAIT_AFTER + 30) and state.news_mode_active:
+        state.news_mode_active = False
         print("✅ News window closed. Resuming normal trading.")
 
 def execute_post_news_trade():
-    global news_trade_done
-    if news_trade_done:
+    if state.news_trade_done:
         return
 
     for symbol in NEWS_SYMBOLS:
@@ -2247,14 +2193,13 @@ def execute_post_news_trade():
 # ==========================================================
 
 def monitor_positions():
-    global last_telegram_report_time
     positions = get_positions()
     current_symbols = {p["symbol"] for p in positions}
-    tracked_symbols = set(active_trade_info.keys())
+    tracked_symbols = set(state.active_trade_info.keys())
 
     closed_symbols = tracked_symbols - current_symbols
     for symbol in closed_symbols:
-        trade_data = active_trade_info.pop(symbol, None)
+        trade_data = state.active_trade_info.pop(symbol, None)
         if not trade_data:
             continue
         pnl = finalize_trade(symbol, trade_data)
@@ -2269,7 +2214,7 @@ def monitor_positions():
     manage_dca()
 
     now = time.time()
-    if now - last_telegram_report_time < TELEGRAM_REPORT_INTERVAL_SEC:
+    if now - state.last_telegram_report_time < TELEGRAM_REPORT_INTERVAL_SEC:
         return
 
     sections = []
@@ -2278,10 +2223,10 @@ def monitor_positions():
         symbol = pos["symbol"]
         pnl = pos["unRealizedProfit"]
         total_unrealized += pnl
-        trade_data = active_trade_info.get(symbol, {})
+        trade_data = state.active_trade_info.get(symbol, {})
         strategy = trade_data.get("strategy", "UNKNOWN")
         side = trade_data.get("side", "UNKNOWN")
-        dca_level = dca_info.get(symbol, {}).get("level", 0)
+        dca_level = state.dca_info.get(symbol, {}).get("level", 0)
         sections.append((
             f"🔹 {symbol} ({side}) [DCA: {dca_level}/{DCA_LEVELS}]",
             [
@@ -2300,12 +2245,12 @@ def monitor_positions():
             ("Unrealized", money(total_unrealized)),
             ("Target", f"${TARGET_PROFIT:.2f}"),
             ("Balance", f"${current_balance:,.2f}"),
-            ("Session Realized", money(session_realized_pnl)),
+            ("Session Realized", money(state.session_realized_pnl)),
         ]
     ))
 
     send_telegram(format_section("ПОЗИЦЫН МОНИТОР", "📊", sections))
-    last_telegram_report_time = now
+    state.last_telegram_report_time = now
 
 
 # ==========================================================
@@ -2313,7 +2258,7 @@ def monitor_positions():
 # ==========================================================
 
 def update_strategy_cooldowns():
-    for strategy, stats in strategy_stats.items():
+    for strategy, stats in state.strategy_stats.items():
         if stats["paused_cycles"] <= 0:
             continue
         stats["paused_cycles"] -= 1
@@ -2330,7 +2275,7 @@ def update_strategy_cooldowns():
             )
 
 def get_active_strategies():
-    return [s for s, stats in strategy_stats.items() if stats["active"]]
+    return [s for s, stats in state.strategy_stats.items() if stats["active"]]
 
 
 # ==========================================================
@@ -2342,7 +2287,7 @@ def send_performance_report():
         return
     total_pnl = 0.0
     sections = []
-    for strategy, stats in strategy_stats.items():
+    for strategy, stats in state.strategy_stats.items():
         if stats["trades"] == 0:
             continue
         win_rate = stats["wins"] / stats["trades"] * 100
@@ -2368,10 +2313,9 @@ def send_performance_report():
 # ==========================================================
 
 def send_cycle_summary():
-    global cycle_start_time, last_cycle_balance
     current_balance = get_usdt_balance()
-    balance_change = current_balance - last_cycle_balance
-    period = f"{datetime.fromtimestamp(cycle_start_time).strftime('%H:%M:%S')} → {datetime.now().strftime('%H:%M:%S')}"
+    balance_change = current_balance - state.last_cycle_balance
+    period = f"{datetime.fromtimestamp(state.cycle_start_time).strftime('%H:%M:%S')} → {datetime.now().strftime('%H:%M:%S')}"
     send_telegram(
         format_block(
             "6 ЦАГИЙН ЦИКЛ",
@@ -2385,8 +2329,8 @@ def send_cycle_summary():
         ),
         pin=True
     )
-    cycle_start_time = time.time()
-    last_cycle_balance = current_balance
+    state.cycle_start_time = time.time()
+    state.last_cycle_balance = current_balance
 
 
 # ==========================================================
@@ -2394,12 +2338,11 @@ def send_cycle_summary():
 # ==========================================================
 
 def safety_recovery():
-    global safety_lock
-    if not safety_lock:
+    if not state.safety_lock:
         return True
     positions = get_positions()
     if not positions:
-        safety_lock = False
+        state.safety_lock = False
         send_telegram(
             format_block(
                 "SAFETY LOCK CLEARED",
@@ -2417,8 +2360,8 @@ def safety_recovery():
     )
     success = close_all_positions_and_verify()
     if success:
-        safety_lock = False
-        active_trade_info.clear()
+        state.safety_lock = False
+        state.active_trade_info.clear()
         send_telegram(
             format_block(
                 "SAFETY RECOVERY SUCCESS",
@@ -2435,7 +2378,6 @@ def safety_recovery():
 # ==========================================================
 
 def main():
-    global session_start_balance, cycle_start_balance, last_cycle_balance, cycle_start_time, safety_lock, session_peak_balance, drawdown_halt, session_realized_pnl
 
     print("=" * 70)
     print("🤖 SMART BOT V2 (SUPERTREND + CHOP + MTF + VWAP + FUNDING + ORDERBOOK + CHART)")
@@ -2466,16 +2408,16 @@ def main():
         print(f"❌ Position sync: {e}")
 
     try:
-        session_start_balance = get_usdt_balance()
-        cycle_start_balance = session_start_balance
-        last_cycle_balance = session_start_balance
-        session_peak_balance = session_start_balance
+        state.session_start_balance = get_usdt_balance()
+        state.cycle_start_balance = state.session_start_balance
+        state.last_cycle_balance = state.session_start_balance
+        state.session_peak_balance = state.session_start_balance
     except Exception:
-        session_start_balance = 0.0
-        cycle_start_balance = 0.0
-        last_cycle_balance = 0.0
-        session_peak_balance = 0.0
-    cycle_start_time = time.time()
+        state.session_start_balance = 0.0
+        state.cycle_start_balance = 0.0
+        state.last_cycle_balance = 0.0
+        state.session_peak_balance = 0.0
+    state.cycle_start_time = time.time()
 
     # Restore the drawdown high-water mark. Without this, a restart after a loss
     # resets the peak to the (lower) current balance and the circuit breaker
@@ -2484,10 +2426,10 @@ def main():
     _saved_session = load_session_state()
     if _saved_session and (time.time() - safe_float(_saved_session.get("saved_at"), 0)) < 86400:
         _restored_peak = safe_float(_saved_session.get("session_peak_balance"), 0.0)
-        if _restored_peak > session_peak_balance:
-            session_peak_balance = _restored_peak
-        session_realized_pnl = safe_float(_saved_session.get("session_realized_pnl"), 0.0)
-        print(f"♻️ Restored session state — peak ${session_peak_balance:,.2f}, realized ${session_realized_pnl:,.2f}")
+        if _restored_peak > state.session_peak_balance:
+            state.session_peak_balance = _restored_peak
+        state.session_realized_pnl = safe_float(_saved_session.get("session_realized_pnl"), 0.0)
+        print(f"♻️ Restored session state — peak ${state.session_peak_balance:,.2f}, realized ${state.session_realized_pnl:,.2f}")
     save_session_state()
 
     send_telegram(
@@ -2543,7 +2485,7 @@ def main():
         try:
             current_time = time.time()
 
-            if drawdown_halt:
+            if state.drawdown_halt:
                 try:
                     remaining = get_positions()
                     if remaining:
@@ -2553,7 +2495,7 @@ def main():
                 time.sleep(MONITOR_INTERVAL_SEC)
                 continue
 
-            if safety_lock:
+            if state.safety_lock:
                 safety_recovery()
                 time.sleep(MONITOR_INTERVAL_SEC)
                 continue
@@ -2563,7 +2505,7 @@ def main():
             except Exception as e:
                 print(f"⚠️ News check error: {e}")
 
-            if news_mode_active:
+            if state.news_mode_active:
                 try:
                     monitor_positions()
                 except Exception as e:
@@ -2575,7 +2517,7 @@ def main():
                 check_drawdown_circuit_breaker()
             except Exception as e:
                 print(f"❌ Drawdown check: {e}")
-            if safety_lock:
+            if state.safety_lock:
                 time.sleep(MONITOR_INTERVAL_SEC)
                 continue
 
@@ -2597,11 +2539,11 @@ def main():
                 success = handle_target_reached(total_unrealized)
                 if success:
                     target_cooldown()
-                    active_trade_info.clear()
-                    safety_lock = False
-                    cycle_start_time = time.time()
-                    cycle_start_balance = get_usdt_balance()
-                    last_cycle_balance = cycle_start_balance
+                    state.active_trade_info.clear()
+                    state.safety_lock = False
+                    state.cycle_start_time = time.time()
+                    state.cycle_start_balance = get_usdt_balance()
+                    state.last_cycle_balance = state.cycle_start_balance
                     last_selection_time = time.time()
 
                     try:
@@ -2612,7 +2554,7 @@ def main():
                         send_telegram(format_block("AUTO RESUME ERROR", "❌", [("Error", str(e)[:400])]))
                     continue
                 else:
-                    safety_lock = True
+                    state.safety_lock = True
                     time.sleep(MONITOR_INTERVAL_SEC)
                     continue
 

@@ -4,8 +4,6 @@
 Гол зорилго: тест ажиллах үед ямар ч тохиолдолд жинхэнэ Binance/Telegram руу
 хүсэлт явахгүй, репод байгаа state файлууд бохирдохгүй байх.
 """
-import copy
-
 import pytest
 
 import bot
@@ -56,22 +54,11 @@ def isolated_state_files(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def clean_globals(monkeypatch):
-    """Global state-ийг тест бүрийн өмнө цэвэр байдалд буцаана."""
-    monkeypatch.setattr(bot, "strategy_stats", copy.deepcopy(bot.strategy_stats))
-    monkeypatch.setattr(bot, "safety_lock", False)
-    monkeypatch.setattr(bot, "drawdown_halt", False)
-    monkeypatch.setattr(bot, "drawdown_lock_active", False)
-    monkeypatch.setattr(bot, "session_peak_balance", 0.0)
-    monkeypatch.setattr(bot, "session_start_balance", 0.0)
-    monkeypatch.setattr(bot, "session_realized_pnl", 0.0)
-    monkeypatch.setattr(bot, "active_trade_info", {})
-    monkeypatch.setattr(bot, "dca_info", {})
-    monkeypatch.setattr(bot, "unprotected_symbols", set())
-    monkeypatch.setattr(bot, "leverage_cache", {})
-    monkeypatch.setattr(bot, "_symbol_info_cache", {})
-    monkeypatch.setattr(bot, "_correlation_cache", {})
-    monkeypatch.setattr(bot, "_correlation_cache_time", {})
+def clean_state():
+    """Runtime state-ийг тест бүрийн өмнө болон дараа цэвэр байдалд буцаана."""
+    bot.state.reset()
+    yield bot.state
+    bot.state.reset()
 
 
 @pytest.fixture
@@ -95,6 +82,6 @@ def fake_symbol_info(monkeypatch):
             "pricePrecision": 5,
         },
     }
-    monkeypatch.setattr(bot, "_symbol_info_cache", info)
+    bot.state.symbol_info_cache = info
     monkeypatch.setattr(bot, "load_exchange_info", lambda: None)
     return info

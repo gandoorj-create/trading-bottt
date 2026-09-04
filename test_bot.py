@@ -442,59 +442,59 @@ class TestRateLimitWait:
 class TestDrawdownCircuitBreaker:
     def test_halts_when_drawdown_exceeds_limit(self, monkeypatch, telegram_messages):
         monkeypatch.setattr(bot, "MAX_SESSION_DRAWDOWN_PCT", 15.0)
-        monkeypatch.setattr(bot, "session_peak_balance", 1000.0)
+        monkeypatch.setattr(bot.state, "session_peak_balance", 1000.0)
         monkeypatch.setattr(bot, "get_usdt_balance", lambda: 800.0)  # -20%
 
         bot.check_drawdown_circuit_breaker()
 
-        assert bot.drawdown_halt is True
-        assert bot.safety_lock is True
+        assert bot.state.drawdown_halt is True
+        assert bot.state.safety_lock is True
         assert any("DRAWDOWN" in m for m in telegram_messages)
 
     def test_does_not_halt_below_limit(self, monkeypatch):
         monkeypatch.setattr(bot, "MAX_SESSION_DRAWDOWN_PCT", 15.0)
-        monkeypatch.setattr(bot, "session_peak_balance", 1000.0)
+        monkeypatch.setattr(bot.state, "session_peak_balance", 1000.0)
         monkeypatch.setattr(bot, "get_usdt_balance", lambda: 950.0)  # -5%
 
         bot.check_drawdown_circuit_breaker()
 
-        assert bot.drawdown_halt is False
-        assert bot.safety_lock is False
+        assert bot.state.drawdown_halt is False
+        assert bot.state.safety_lock is False
 
     def test_new_high_updates_peak_and_clears_lock(self, monkeypatch):
         monkeypatch.setattr(bot, "MAX_SESSION_DRAWDOWN_PCT", 15.0)
-        monkeypatch.setattr(bot, "session_peak_balance", 1000.0)
-        monkeypatch.setattr(bot, "drawdown_lock_active", True)
+        monkeypatch.setattr(bot.state, "session_peak_balance", 1000.0)
+        monkeypatch.setattr(bot.state, "drawdown_lock_active", True)
         monkeypatch.setattr(bot, "get_usdt_balance", lambda: 1200.0)
 
         bot.check_drawdown_circuit_breaker()
 
-        assert bot.session_peak_balance == 1200.0
-        assert bot.drawdown_lock_active is False
+        assert bot.state.session_peak_balance == 1200.0
+        assert bot.state.drawdown_lock_active is False
 
     def test_disabled_when_limit_is_zero(self, monkeypatch):
         monkeypatch.setattr(bot, "MAX_SESSION_DRAWDOWN_PCT", 0.0)
-        monkeypatch.setattr(bot, "session_peak_balance", 1000.0)
+        monkeypatch.setattr(bot.state, "session_peak_balance", 1000.0)
         monkeypatch.setattr(bot, "get_usdt_balance", lambda: 1.0)  # -99.9%
 
         bot.check_drawdown_circuit_breaker()
 
-        assert bot.drawdown_halt is False
+        assert bot.state.drawdown_halt is False
 
     def test_zero_balance_does_not_trigger_false_halt(self, monkeypatch):
         # Баланс уншиж чадаагүй (0.0 буцсан) тохиолдолд halt хийх ёсгүй
         monkeypatch.setattr(bot, "MAX_SESSION_DRAWDOWN_PCT", 15.0)
-        monkeypatch.setattr(bot, "session_peak_balance", 1000.0)
+        monkeypatch.setattr(bot.state, "session_peak_balance", 1000.0)
         monkeypatch.setattr(bot, "get_usdt_balance", lambda: 0.0)
 
         bot.check_drawdown_circuit_breaker()
 
-        assert bot.drawdown_halt is False
+        assert bot.state.drawdown_halt is False
 
     def test_does_not_re_trigger_while_safety_locked(self, monkeypatch, telegram_messages):
         monkeypatch.setattr(bot, "MAX_SESSION_DRAWDOWN_PCT", 15.0)
-        monkeypatch.setattr(bot, "session_peak_balance", 1000.0)
-        monkeypatch.setattr(bot, "safety_lock", True)
+        monkeypatch.setattr(bot.state, "session_peak_balance", 1000.0)
+        monkeypatch.setattr(bot.state, "safety_lock", True)
         monkeypatch.setattr(bot, "get_usdt_balance", lambda: 500.0)
 
         bot.check_drawdown_circuit_breaker()
@@ -508,10 +508,10 @@ class TestDrawdownCircuitBreaker:
 
 class TestUpdateStrategyPerformance:
     def test_win_increments_wins_and_resets_streak(self, monkeypatch):
-        bot.strategy_stats["RSI_STRATEGY"]["consecutive_losses"] = 2
+        bot.state.strategy_stats["RSI_STRATEGY"]["consecutive_losses"] = 2
         bot.update_strategy_performance("RSI_STRATEGY", 25.0)
 
-        stats = bot.strategy_stats["RSI_STRATEGY"]
+        stats = bot.state.strategy_stats["RSI_STRATEGY"]
         assert stats["trades"] == 1
         assert stats["wins"] == 1
         assert stats["consecutive_losses"] == 0
@@ -521,7 +521,7 @@ class TestUpdateStrategyPerformance:
         monkeypatch.setattr(bot, "CONSECUTIVE_LOSS_LIMIT", 3)
         bot.update_strategy_performance("RSI_STRATEGY", -10.0)
 
-        stats = bot.strategy_stats["RSI_STRATEGY"]
+        stats = bot.state.strategy_stats["RSI_STRATEGY"]
         assert stats["losses"] == 1
         assert stats["consecutive_losses"] == 1
         assert stats["active"] is True
@@ -534,7 +534,7 @@ class TestUpdateStrategyPerformance:
         for _ in range(3):
             bot.update_strategy_performance("RSI_STRATEGY", -10.0)
 
-        stats = bot.strategy_stats["RSI_STRATEGY"]
+        stats = bot.state.strategy_stats["RSI_STRATEGY"]
         assert stats["active"] is False
         assert stats["paused_cycles"] == 2
         assert any("PAUSED" in m for m in telegram_messages)
@@ -546,39 +546,39 @@ class TestUpdateStrategyPerformance:
         for _ in range(5):
             bot.update_strategy_performance("RSI_STRATEGY", -10.0)
 
-        assert bot.strategy_stats["RSI_STRATEGY"]["active"] is True
+        assert bot.state.strategy_stats["RSI_STRATEGY"]["active"] is True
 
     def test_unknown_strategy_is_ignored(self):
         bot.update_strategy_performance("NOT_A_STRATEGY", -10.0)
-        assert "NOT_A_STRATEGY" not in bot.strategy_stats
+        assert "NOT_A_STRATEGY" not in bot.state.strategy_stats
 
     def test_session_pnl_accumulates(self):
         bot.update_strategy_performance("RSI_STRATEGY", 10.0)
         bot.update_strategy_performance("MACD_MOMENTUM", -4.0)
-        assert bot.session_realized_pnl == pytest.approx(6.0)
+        assert bot.state.session_realized_pnl == pytest.approx(6.0)
 
 
 class TestStrategyCooldowns:
     def test_paused_cycles_count_down(self):
-        bot.strategy_stats["RSI_STRATEGY"].update(active=False, paused_cycles=2)
+        bot.state.strategy_stats["RSI_STRATEGY"].update(active=False, paused_cycles=2)
         bot.update_strategy_cooldowns()
 
-        assert bot.strategy_stats["RSI_STRATEGY"]["paused_cycles"] == 1
-        assert bot.strategy_stats["RSI_STRATEGY"]["active"] is False
+        assert bot.state.strategy_stats["RSI_STRATEGY"]["paused_cycles"] == 1
+        assert bot.state.strategy_stats["RSI_STRATEGY"]["active"] is False
 
     def test_reactivates_when_cooldown_finishes(self, telegram_messages):
-        bot.strategy_stats["RSI_STRATEGY"].update(
+        bot.state.strategy_stats["RSI_STRATEGY"].update(
             active=False, paused_cycles=1, consecutive_losses=3
         )
         bot.update_strategy_cooldowns()
 
-        stats = bot.strategy_stats["RSI_STRATEGY"]
+        stats = bot.state.strategy_stats["RSI_STRATEGY"]
         assert stats["active"] is True
         assert stats["consecutive_losses"] == 0
         assert any("REACTIVATED" in m for m in telegram_messages)
 
     def test_active_strategies_excludes_paused(self):
-        bot.strategy_stats["RSI_STRATEGY"]["active"] = False
+        bot.state.strategy_stats["RSI_STRATEGY"]["active"] = False
         active = bot.get_active_strategies()
 
         assert "RSI_STRATEGY" not in active
@@ -591,33 +591,33 @@ class TestStrategyCooldowns:
 
 class TestStatePersistence:
     def test_strategy_state_roundtrip(self):
-        bot.strategy_stats["RSI_STRATEGY"].update(trades=7, wins=4, total_pnl=123.45)
+        bot.state.strategy_stats["RSI_STRATEGY"].update(trades=7, wins=4, total_pnl=123.45)
         bot.save_strategy_state()
 
-        bot.strategy_stats["RSI_STRATEGY"].update(trades=0, wins=0, total_pnl=0.0)
+        bot.state.strategy_stats["RSI_STRATEGY"].update(trades=0, wins=0, total_pnl=0.0)
         bot.load_strategy_state()
 
-        stats = bot.strategy_stats["RSI_STRATEGY"]
+        stats = bot.state.strategy_stats["RSI_STRATEGY"]
         assert stats["trades"] == 7
         assert stats["wins"] == 4
         assert stats["total_pnl"] == pytest.approx(123.45)
 
     def test_missing_strategy_file_is_noop(self):
-        bot.strategy_stats["RSI_STRATEGY"]["trades"] = 3
+        bot.state.strategy_stats["RSI_STRATEGY"]["trades"] = 3
         bot.load_strategy_state()  # файл байхгүй
-        assert bot.strategy_stats["RSI_STRATEGY"]["trades"] == 3
+        assert bot.state.strategy_stats["RSI_STRATEGY"]["trades"] == 3
 
     def test_corrupt_strategy_file_does_not_crash(self, isolated_state_files):
         (isolated_state_files / "strategy_state.json").write_text("{ энэ бол JSON биш")
-        bot.strategy_stats["RSI_STRATEGY"]["trades"] = 5
+        bot.state.strategy_stats["RSI_STRATEGY"]["trades"] = 5
 
         bot.load_strategy_state()  # алдаа шидэх ёсгүй
 
-        assert bot.strategy_stats["RSI_STRATEGY"]["trades"] == 5
+        assert bot.state.strategy_stats["RSI_STRATEGY"]["trades"] == 5
 
     def test_session_state_roundtrip(self, monkeypatch):
-        monkeypatch.setattr(bot, "session_peak_balance", 1500.0)
-        monkeypatch.setattr(bot, "session_start_balance", 1000.0)
+        monkeypatch.setattr(bot.state, "session_peak_balance", 1500.0)
+        monkeypatch.setattr(bot.state, "session_start_balance", 1000.0)
         bot.save_session_state()
 
         data = bot.load_session_state()
@@ -799,8 +799,8 @@ class TestExecuteTradesHappyPath:
     def test_opened_trade_is_tracked(self, tradeable):
         bot.execute_trades([_coin()], total_balance=1000.0)
 
-        assert "BTCUSDT" in bot.active_trade_info
-        assert bot.active_trade_info["BTCUSDT"]["strategy"] == "RSI_STRATEGY"
+        assert "BTCUSDT" in bot.state.active_trade_info
+        assert bot.state.active_trade_info["BTCUSDT"]["strategy"] == "RSI_STRATEGY"
 
     def test_failed_protection_closes_position_immediately(self, monkeypatch, tradeable, telegram_messages):
         monkeypatch.setattr(bot, "rebuild_protection_orders",
@@ -812,7 +812,7 @@ class TestExecuteTradesHappyPath:
         # нээх + яаралтай хаах = 2 захиалга, позиц хөтлөгдөж үлдэх ёсгүй
         assert len(tradeable) == 2
         assert tradeable[1]["side"] == "SELL"
-        assert "BTCUSDT" not in bot.active_trade_info
+        assert "BTCUSDT" not in bot.state.active_trade_info
         assert any("EMERGENCY CLOSED" in m for m in telegram_messages)
 
     def test_unfilled_order_does_not_create_phantom_position(self, monkeypatch, tradeable, telegram_messages):
@@ -821,7 +821,7 @@ class TestExecuteTradesHappyPath:
 
         bot.execute_trades([_coin()], total_balance=1000.0)
 
-        assert "BTCUSDT" not in bot.active_trade_info
+        assert "BTCUSDT" not in bot.state.active_trade_info
         assert any("NOT FILLED" in m for m in telegram_messages)
 
 
@@ -833,7 +833,7 @@ class TestExecuteTradesGuards:
     """
 
     def test_safety_lock_blocks_all_trades(self, monkeypatch, tradeable):
-        monkeypatch.setattr(bot, "safety_lock", True)
+        monkeypatch.setattr(bot.state, "safety_lock", True)
 
         bot.execute_trades([_coin()], total_balance=1000.0)
 
@@ -892,7 +892,7 @@ class TestExecuteTradesGuards:
         assert len(tradeable) == 1
 
     def test_unprotected_symbol_is_skipped(self, monkeypatch, tradeable):
-        monkeypatch.setattr(bot, "unprotected_symbols", {"BTCUSDT"})
+        monkeypatch.setattr(bot.state, "unprotected_symbols", {"BTCUSDT"})
 
         bot.execute_trades([_coin()], total_balance=1000.0)
 
@@ -962,32 +962,32 @@ def monitor_env(monkeypatch):
     monkeypatch.setattr(bot, "cancel_all_symbol_orders", lambda symbol: None)
     monkeypatch.setattr(bot, "manage_dca", lambda: None)
     monkeypatch.setattr(bot, "get_usdt_balance", lambda: 1000.0)
-    monkeypatch.setattr(bot, "last_telegram_report_time", 0.0)
+    monkeypatch.setattr(bot.state, "last_telegram_report_time", 0.0)
     return finalized
 
 
 class TestMonitorPositions:
     def test_closed_position_is_finalized_and_untracked(self, monkeypatch, monitor_env):
         # Bot нь BTCUSDT-г хөтөлж байсан ч биржид байхгүй болсон = хаагдсан
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "get_positions", lambda: [])
 
         bot.monitor_positions()
 
         assert monitor_env == ["BTCUSDT"]
-        assert "BTCUSDT" not in bot.active_trade_info
+        assert "BTCUSDT" not in bot.state.active_trade_info
 
     def test_open_position_is_not_finalized(self, monkeypatch, monitor_env):
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
 
         bot.monitor_positions()
 
         assert monitor_env == []
-        assert "BTCUSDT" in bot.active_trade_info
+        assert "BTCUSDT" in bot.state.active_trade_info
 
     def test_only_the_closed_symbol_is_finalized(self, monkeypatch, monitor_env):
-        monkeypatch.setattr(bot, "active_trade_info", {
+        monkeypatch.setattr(bot.state, "active_trade_info", {
             "BTCUSDT": _trade_info(),
             "ETHUSDT": _trade_info(),
         })
@@ -996,12 +996,12 @@ class TestMonitorPositions:
         bot.monitor_positions()
 
         assert monitor_env == ["BTCUSDT"]
-        assert set(bot.active_trade_info) == {"ETHUSDT"}
+        assert set(bot.state.active_trade_info) == {"ETHUSDT"}
 
     def test_cancels_leftover_orders_of_closed_position(self, monkeypatch, monitor_env):
         cancelled = []
         monkeypatch.setattr(bot, "cancel_all_symbol_orders", lambda symbol: cancelled.append(symbol))
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "get_positions", lambda: [])
 
         bot.monitor_positions()
@@ -1013,7 +1013,7 @@ class TestMonitorPositions:
             raise RuntimeError("API down")
 
         monkeypatch.setattr(bot, "cancel_all_symbol_orders", boom)
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "get_positions", lambda: [])
 
         bot.monitor_positions()  # алдаа шидэх ёсгүй
@@ -1021,29 +1021,29 @@ class TestMonitorPositions:
         assert monitor_env == ["BTCUSDT"]
 
     def test_report_sent_when_interval_elapsed(self, monkeypatch, monitor_env, telegram_messages):
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
         monkeypatch.setattr(bot, "TELEGRAM_REPORT_INTERVAL_SEC", 0)
 
         bot.monitor_positions()
 
         assert any("МОНИТОР" in m for m in telegram_messages)
-        assert bot.last_telegram_report_time > 0
+        assert bot.state.last_telegram_report_time > 0
 
     def test_report_throttled_within_interval(self, monkeypatch, monitor_env, telegram_messages):
         import time as _time
 
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
         monkeypatch.setattr(bot, "TELEGRAM_REPORT_INTERVAL_SEC", 300)
-        monkeypatch.setattr(bot, "last_telegram_report_time", _time.time())
+        monkeypatch.setattr(bot.state, "last_telegram_report_time", _time.time())
 
         bot.monitor_positions()
 
         assert telegram_messages == []
 
     def test_no_positions_sends_no_report(self, monkeypatch, monitor_env, telegram_messages):
-        monkeypatch.setattr(bot, "active_trade_info", {})
+        monkeypatch.setattr(bot.state, "active_trade_info", {})
         monkeypatch.setattr(bot, "get_positions", lambda: [])
         monkeypatch.setattr(bot, "TELEGRAM_REPORT_INTERVAL_SEC", 0)
 
@@ -1066,22 +1066,22 @@ def target_env(monkeypatch):
 
 class TestHandleTargetReached:
     def test_successful_close_returns_true_and_clears_tracking(self, monkeypatch, target_env, telegram_messages):
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: True)
         monkeypatch.setattr(bot, "get_positions", lambda: [])
 
         assert bot.handle_target_reached(310.0) is True
-        assert bot.active_trade_info == {}
+        assert bot.state.active_trade_info == {}
         assert any("TARGET REALIZED" in m for m in telegram_messages)
 
     def test_safety_lock_engaged_before_closing(self, monkeypatch, target_env):
         seen = {}
 
         def fake_close():
-            seen["locked_during_close"] = bot.safety_lock
+            seen["locked_during_close"] = bot.state.safety_lock
             return True
 
-        monkeypatch.setattr(bot, "active_trade_info", {})
+        monkeypatch.setattr(bot.state, "active_trade_info", {})
         monkeypatch.setattr(bot, "close_all_positions_and_verify", fake_close)
         monkeypatch.setattr(bot, "get_positions", lambda: [])
 
@@ -1091,29 +1091,29 @@ class TestHandleTargetReached:
         assert seen["locked_during_close"] is True
 
     def test_failed_close_returns_false_and_keeps_lock(self, monkeypatch, target_env, telegram_messages):
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: False)
         monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
 
         assert bot.handle_target_reached(310.0) is False
-        assert bot.safety_lock is True
+        assert bot.state.safety_lock is True
         assert any("CLOSE INCOMPLETE" in m for m in telegram_messages)
 
     def test_leftover_position_after_close_fails_safety_check(self, monkeypatch, target_env, telegram_messages):
         # close_all нь True гэж мэдээлсэн ч бодит байдал дээр позиц үлдсэн
-        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
         monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: True)
         monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
 
         assert bot.handle_target_reached(310.0) is False
-        assert bot.safety_lock is True
+        assert bot.state.safety_lock is True
         assert any("FINAL SAFETY CHECK FAILED" in m for m in telegram_messages)
 
     def test_all_tracked_trades_are_finalized(self, monkeypatch, target_env):
         finalized = []
         monkeypatch.setattr(bot, "finalize_trade",
                             lambda symbol, trade_data: finalized.append(symbol) or 100.0)
-        monkeypatch.setattr(bot, "active_trade_info", {
+        monkeypatch.setattr(bot.state, "active_trade_info", {
             "BTCUSDT": _trade_info(), "ETHUSDT": _trade_info(),
         })
         monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: True)
@@ -1188,7 +1188,7 @@ class TestScreenCoins:
 
     def test_paused_strategy_is_ignored(self, monkeypatch, screen_env):
         _use_analyses(monkeypatch, [_analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)})])
-        bot.strategy_stats["RSI_STRATEGY"]["active"] = False
+        bot.state.strategy_stats["RSI_STRATEGY"]["active"] = False
 
         assert bot.screen_coins() == []
 
