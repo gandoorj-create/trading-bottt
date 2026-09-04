@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
+htmlcov/
+
+# Ботын runtime state — сервер дээр үүсдэг, репод хадгалахгүй
+strategy_state.json
+session_state.json
