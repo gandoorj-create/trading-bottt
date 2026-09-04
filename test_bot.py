@@ -923,3 +923,331 @@ class TestExecuteTradesGuards:
         bot.execute_trades([_coin(symbol="FAKEUSDT")], total_balance=1000.0)
 
         assert tradeable == []
+
+
+# ----------------------------------------------------------------
+# monitor_positions — хаагдсан позицыг таних, тайланг хязгаарлах
+# ----------------------------------------------------------------
+
+def _position(symbol="BTCUSDT", amt=1.0, entry=100.0, mark=105.0, pnl=5.0):
+    return {
+        "symbol": symbol,
+        "positionAmt": amt,
+        "entryPrice": entry,
+        "markPrice": mark,
+        "unRealizedProfit": pnl,
+        "positionSide": "BOTH",
+    }
+
+
+def _trade_info(strategy="RSI_STRATEGY", side="BUY"):
+    return {
+        "strategy": strategy,
+        "side": side,
+        "entry_price": 100.0,
+        "quantity": 1.0,
+        "position_side": "BOTH",
+        "opened_at": 1_700_000_000.0,
+        "opened_at_ms": 1_700_000_000_000,
+    }
+
+
+@pytest.fixture
+def monitor_env(monkeypatch):
+    """monitor_positions-ийн гадаад хамаарлыг мок болгоно."""
+    finalized = []
+
+    monkeypatch.setattr(bot, "finalize_trade",
+                        lambda symbol, trade_data: finalized.append(symbol) or 12.5)
+    monkeypatch.setattr(bot, "cancel_all_symbol_orders", lambda symbol: None)
+    monkeypatch.setattr(bot, "manage_dca", lambda: None)
+    monkeypatch.setattr(bot, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot, "last_telegram_report_time", 0.0)
+    return finalized
+
+
+class TestMonitorPositions:
+    def test_closed_position_is_finalized_and_untracked(self, monkeypatch, monitor_env):
+        # Bot нь BTCUSDT-г хөтөлж байсан ч биржид байхгүй болсон = хаагдсан
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "get_positions", lambda: [])
+
+        bot.monitor_positions()
+
+        assert monitor_env == ["BTCUSDT"]
+        assert "BTCUSDT" not in bot.active_trade_info
+
+    def test_open_position_is_not_finalized(self, monkeypatch, monitor_env):
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
+
+        bot.monitor_positions()
+
+        assert monitor_env == []
+        assert "BTCUSDT" in bot.active_trade_info
+
+    def test_only_the_closed_symbol_is_finalized(self, monkeypatch, monitor_env):
+        monkeypatch.setattr(bot, "active_trade_info", {
+            "BTCUSDT": _trade_info(),
+            "ETHUSDT": _trade_info(),
+        })
+        monkeypatch.setattr(bot, "get_positions", lambda: [_position("ETHUSDT")])
+
+        bot.monitor_positions()
+
+        assert monitor_env == ["BTCUSDT"]
+        assert set(bot.active_trade_info) == {"ETHUSDT"}
+
+    def test_cancels_leftover_orders_of_closed_position(self, monkeypatch, monitor_env):
+        cancelled = []
+        monkeypatch.setattr(bot, "cancel_all_symbol_orders", lambda symbol: cancelled.append(symbol))
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "get_positions", lambda: [])
+
+        bot.monitor_positions()
+
+        assert cancelled == ["BTCUSDT"]
+
+    def test_cancel_failure_does_not_break_monitoring(self, monkeypatch, monitor_env):
+        def boom(symbol):
+            raise RuntimeError("API down")
+
+        monkeypatch.setattr(bot, "cancel_all_symbol_orders", boom)
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "get_positions", lambda: [])
+
+        bot.monitor_positions()  # алдаа шидэх ёсгүй
+
+        assert monitor_env == ["BTCUSDT"]
+
+    def test_report_sent_when_interval_elapsed(self, monkeypatch, monitor_env, telegram_messages):
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
+        monkeypatch.setattr(bot, "TELEGRAM_REPORT_INTERVAL_SEC", 0)
+
+        bot.monitor_positions()
+
+        assert any("МОНИТОР" in m for m in telegram_messages)
+        assert bot.last_telegram_report_time > 0
+
+    def test_report_throttled_within_interval(self, monkeypatch, monitor_env, telegram_messages):
+        import time as _time
+
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
+        monkeypatch.setattr(bot, "TELEGRAM_REPORT_INTERVAL_SEC", 300)
+        monkeypatch.setattr(bot, "last_telegram_report_time", _time.time())
+
+        bot.monitor_positions()
+
+        assert telegram_messages == []
+
+    def test_no_positions_sends_no_report(self, monkeypatch, monitor_env, telegram_messages):
+        monkeypatch.setattr(bot, "active_trade_info", {})
+        monkeypatch.setattr(bot, "get_positions", lambda: [])
+        monkeypatch.setattr(bot, "TELEGRAM_REPORT_INTERVAL_SEC", 0)
+
+        bot.monitor_positions()
+
+        assert telegram_messages == []
+
+
+# ----------------------------------------------------------------
+# handle_target_reached — ашгийн зорилтод хүрэхэд бүх позиц хаагдах ёстой
+# ----------------------------------------------------------------
+
+@pytest.fixture
+def target_env(monkeypatch):
+    monkeypatch.setattr(bot, "get_usdt_balance", lambda: 1300.0)
+    monkeypatch.setattr(bot, "finalize_trade", lambda symbol, trade_data: 150.0)
+    monkeypatch.setattr(bot.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(bot, "TARGET_PROFIT", 300.0)
+
+
+class TestHandleTargetReached:
+    def test_successful_close_returns_true_and_clears_tracking(self, monkeypatch, target_env, telegram_messages):
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: True)
+        monkeypatch.setattr(bot, "get_positions", lambda: [])
+
+        assert bot.handle_target_reached(310.0) is True
+        assert bot.active_trade_info == {}
+        assert any("TARGET REALIZED" in m for m in telegram_messages)
+
+    def test_safety_lock_engaged_before_closing(self, monkeypatch, target_env):
+        seen = {}
+
+        def fake_close():
+            seen["locked_during_close"] = bot.safety_lock
+            return True
+
+        monkeypatch.setattr(bot, "active_trade_info", {})
+        monkeypatch.setattr(bot, "close_all_positions_and_verify", fake_close)
+        monkeypatch.setattr(bot, "get_positions", lambda: [])
+
+        bot.handle_target_reached(310.0)
+
+        # Хаах явцад шинэ арилжаа нээгдэхээс сэргийлж түгжээ тавьсан байх ёстой
+        assert seen["locked_during_close"] is True
+
+    def test_failed_close_returns_false_and_keeps_lock(self, monkeypatch, target_env, telegram_messages):
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: False)
+        monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
+
+        assert bot.handle_target_reached(310.0) is False
+        assert bot.safety_lock is True
+        assert any("CLOSE INCOMPLETE" in m for m in telegram_messages)
+
+    def test_leftover_position_after_close_fails_safety_check(self, monkeypatch, target_env, telegram_messages):
+        # close_all нь True гэж мэдээлсэн ч бодит байдал дээр позиц үлдсэн
+        monkeypatch.setattr(bot, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: True)
+        monkeypatch.setattr(bot, "get_positions", lambda: [_position()])
+
+        assert bot.handle_target_reached(310.0) is False
+        assert bot.safety_lock is True
+        assert any("FINAL SAFETY CHECK FAILED" in m for m in telegram_messages)
+
+    def test_all_tracked_trades_are_finalized(self, monkeypatch, target_env):
+        finalized = []
+        monkeypatch.setattr(bot, "finalize_trade",
+                            lambda symbol, trade_data: finalized.append(symbol) or 100.0)
+        monkeypatch.setattr(bot, "active_trade_info", {
+            "BTCUSDT": _trade_info(), "ETHUSDT": _trade_info(),
+        })
+        monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: True)
+        monkeypatch.setattr(bot, "get_positions", lambda: [])
+
+        bot.handle_target_reached(310.0)
+
+        assert sorted(finalized) == ["BTCUSDT", "ETHUSDT"]
+
+
+# ----------------------------------------------------------------
+# screen_coins — сонголтын шүүлтүүр
+# ----------------------------------------------------------------
+
+def _analysis(symbol, strategy_signals):
+    """strategy_signals: {strategy: (signal, score)}"""
+    strategies = {}
+    for strategy, (signal, score) in strategy_signals.items():
+        strategies[strategy] = {
+            "strategy": strategy,
+            "symbol": symbol,
+            "price": 100.0,
+            "score": score,
+            "signal": signal,
+            "adx": 30.0,
+            "rsi": 45.0,
+            "regime": "TRENDING",
+        }
+    return {"symbol": symbol, "price": 100.0, "strategies": strategies}
+
+
+@pytest.fixture
+def screen_env(monkeypatch):
+    """screen_coins-ийн сүлжээ болон тайлангийн хамаарлыг мок болгоно."""
+    monkeypatch.setattr(bot, "get_positions", lambda: [])
+    monkeypatch.setattr(bot, "get_usdt_balance", lambda: 1000.0)
+    monkeypatch.setattr(bot, "get_actual_leverage", lambda symbol: 5)
+    monkeypatch.setattr(bot, "send_selection_report",
+                        lambda selected, all_candidates=None, skipped_reasons=None: None)
+    monkeypatch.setattr(bot, "CHART_SEND_ON_SIGNAL", False)
+    monkeypatch.setattr(bot, "CORRELATION_ENABLED", False)
+    monkeypatch.setattr(bot, "MIN_SIGNAL_SCORE", 20.0)
+    monkeypatch.setattr(bot, "MAX_SELECTIONS", 6)
+
+
+def _use_analyses(monkeypatch, analyses):
+    by_symbol = {a["symbol"]: a for a in analyses}
+    monkeypatch.setattr(bot, "SYMBOLS_POOL", list(by_symbol))
+    monkeypatch.setattr(
+        bot, "analyze_coin",
+        lambda symbol, check_correlation=True, active_symbols=None: by_symbol.get(symbol),
+    )
+
+
+class TestScreenCoins:
+    def test_selects_signal_above_min_score(self, monkeypatch, screen_env):
+        _use_analyses(monkeypatch, [_analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 50.0)})])
+
+        selected = bot.screen_coins()
+
+        assert [c["symbol"] for c in selected] == ["BTCUSDT"]
+
+    def test_low_score_signal_is_filtered_out(self, monkeypatch, screen_env):
+        _use_analyses(monkeypatch, [_analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 5.0)})])
+
+        assert bot.screen_coins() == []
+
+    def test_hold_signal_is_ignored(self, monkeypatch, screen_env):
+        _use_analyses(monkeypatch, [_analysis("BTCUSDT", {"RSI_STRATEGY": ("HOLD", 90.0)})])
+
+        assert bot.screen_coins() == []
+
+    def test_paused_strategy_is_ignored(self, monkeypatch, screen_env):
+        _use_analyses(monkeypatch, [_analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)})])
+        bot.strategy_stats["RSI_STRATEGY"]["active"] = False
+
+        assert bot.screen_coins() == []
+
+    def test_duplicate_symbol_keeps_highest_score(self, monkeypatch, screen_env):
+        _use_analyses(monkeypatch, [_analysis("BTCUSDT", {
+            "RSI_STRATEGY": ("BUY", 40.0),
+            "SUPERTREND": ("BUY", 80.0),
+        })])
+
+        selected = bot.screen_coins()
+
+        assert len(selected) == 1
+        assert selected[0]["strategy"] == "SUPERTREND"
+
+    def test_respects_max_selections(self, monkeypatch, screen_env):
+        monkeypatch.setattr(bot, "MAX_SELECTIONS", 2)
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)}),
+            _analysis("ETHUSDT", {"SUPERTREND": ("BUY", 80.0)}),
+            _analysis("SOLUSDT", {"MACD_MOMENTUM": ("BUY", 70.0)}),
+        ])
+
+        assert len(bot.screen_coins()) == 2
+
+    def test_correlated_symbol_is_removed(self, monkeypatch, screen_env):
+        monkeypatch.setattr(bot, "CORRELATION_ENABLED", True)
+        monkeypatch.setattr(bot, "CORRELATION_THRESHOLD", 0.65)
+        monkeypatch.setattr(bot, "calculate_correlation_cached",
+                            lambda s1, s2, lookback=50: 0.95)
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)}),
+            _analysis("ETHUSDT", {"SUPERTREND": ("BUY", 80.0)}),
+        ])
+
+        selected = bot.screen_coins()
+
+        assert len(selected) == 1
+
+    def test_uncorrelated_symbols_both_kept(self, monkeypatch, screen_env):
+        monkeypatch.setattr(bot, "CORRELATION_ENABLED", True)
+        monkeypatch.setattr(bot, "CORRELATION_THRESHOLD", 0.65)
+        monkeypatch.setattr(bot, "calculate_correlation_cached",
+                            lambda s1, s2, lookback=50: 0.1)
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)}),
+            _analysis("ETHUSDT", {"SUPERTREND": ("BUY", 80.0)}),
+        ])
+
+        assert len(bot.screen_coins()) == 2
+
+    def test_failed_analysis_is_skipped(self, monkeypatch, screen_env):
+        # analyze_coin алдаа гарвал None буцаадаг — энэ нь бүх screening-ийг унагаах ёсгүй
+        monkeypatch.setattr(bot, "SYMBOLS_POOL", ["BTCUSDT", "ETHUSDT"])
+        monkeypatch.setattr(
+            bot, "analyze_coin",
+            lambda symbol, check_correlation=True, active_symbols=None:
+                None if symbol == "BTCUSDT" else _analysis("ETHUSDT", {"RSI_STRATEGY": ("BUY", 50.0)}),
+        )
+
+        selected = bot.screen_coins()
+
+        assert [c["symbol"] for c in selected] == ["ETHUSDT"]
