@@ -447,11 +447,20 @@ def get_position_mode():
 # 📌 POSITIONS
 # ==========================================================
 
+class PositionFetchError(RuntimeError):
+    """positionRisk API-аас позицын жагсаалтыг уншиж чадсангүй.
+
+    Сүлжээний алдаа гарахад хоосон жагсаалт буцаах нь "позиц байхгүй" гэсэн
+    утгатай ижил болж, бот нээлттэй позицуудыг хаагдсан гэж андуурч SL/TP-г
+    цуцалдаг байсан. Тиймээс тодорхойгүй байдлыг заавал алдаагаар илэрхийлнэ.
+    """
+
+
 def get_positions():
     data = send_signed_request("GET", "/fapi/v2/positionRisk")
     positions = []
     if not isinstance(data, list):
-        return positions
+        raise PositionFetchError(api_error_text(data))
     for pos in data:
         amount = safe_float(pos.get("positionAmt"))
         if abs(amount) <= 0:
@@ -1407,6 +1416,8 @@ def run_backtest(symbol, strategy, days=30, interval="1h"):
 # ==========================================================
 
 def sync_existing_positions():
+    # Алдаа гарвал main() барьж авна — "позиц байхгүй" гэж андуурч
+    # хамгаалалтгүй позицуудыг орхихоос сэргийлнэ.
     positions = get_positions()
     if not positions:
         return
@@ -1582,7 +1593,14 @@ def ensure_leverage(symbol, leverage=LEVERAGE):
 # ==========================================================
 
 def calculate_trailing_activation(symbol, signal, entry_price):
-    positions = get_positions()
+    try:
+        positions = get_positions()
+    except PositionFetchError as e:
+        # Mark price нь зөвхөн нарийвчлалд хэрэгтэй — уншигдаагүй бол entry-ээр
+        # тооцоолно, эс тэгвээс хамгаалалтын захиалга огт үүсэхгүй үлдэнэ.
+        print(f"⚠️ Trailing activation {symbol}: mark price уншигдсангүй, entry ашиглав ({e})")
+        positions = []
+
     mark_price = entry_price
     for pos in positions:
         if pos["symbol"] == symbol:
@@ -1723,7 +1741,13 @@ def execute_trades(selected_coins, total_balance):
             continue
 
         time.sleep(0.5)
-        current_positions = get_positions()
+        try:
+            current_positions = get_positions()
+        except PositionFetchError as e:
+            # Захиалга аль хэдийн илгээгдсэн — жагсаалт уншигдаагүй бол доорх
+            # fill шалгалт руу шилжиж, захиалгын хариунаас хамгаалалт барина.
+            print(f"⚠️ {symbol}: захиалгын дараах позиц уншигдсангүй ({e})")
+            current_positions = []
         actual_position = None
         for p in current_positions:
             if p["symbol"] == symbol:
@@ -1867,7 +1891,14 @@ def close_all_positions_and_verify():
     print("\n" + "=" * 70)
     print("🔒 CLOSE ALL POSITIONS")
     print("=" * 70)
-    positions = get_positions()
+    try:
+        positions = get_positions()
+    except PositionFetchError as e:
+        # Позиц үлдсэн эсэхийг мэдэхгүй байж "бүгд хаагдлаа" гэж хэлэх нь
+        # хамгийн аюултай худал — бүтэлгүйтсэн гэж тооцно.
+        print(f"🚨 CLOSE ALL: позиц уншиж чадсангүй ({e})")
+        return False
+
     if not positions:
         print("✅ No open positions.")
         return True
@@ -1888,7 +1919,12 @@ def close_all_positions_and_verify():
 
     for attempt in range(1, CLOSE_VERIFY_ATTEMPTS + 1):
         time.sleep(CLOSE_VERIFY_DELAY_SEC)
-        remaining = get_positions()
+        try:
+            remaining = get_positions()
+        except PositionFetchError as e:
+            # Баталгаажуулж чадаагүй мөчлөгийг "хаагдсан" гэж үзэхгүй, дахин оролдоно
+            print(f"⏳ CLOSE VERIFY {attempt}/{CLOSE_VERIFY_ATTEMPTS} | позиц уншигдсангүй ({e})")
+            continue
         if not remaining:
             print("✅ ALL POSITIONS CLOSED")
             for symbol in symbols:
@@ -1902,7 +1938,11 @@ def close_all_positions_and_verify():
             close_one_position(pos)
             time.sleep(0.4)
 
-    remaining = get_positions()
+    try:
+        remaining = get_positions()
+    except PositionFetchError as e:
+        print(f"🚨 POSITION CLOSE UNVERIFIED ({e})")
+        return False
     if remaining:
         print("🚨 POSITION CLOSE INCOMPLETE")
         return False
@@ -1954,7 +1994,20 @@ def handle_target_reached(total_unrealized):
             continue
         target_realized += finalize_trade(symbol, trade_data)
 
-    final_positions = get_positions()
+    try:
+        final_positions = get_positions()
+    except PositionFetchError as e:
+        # Эцсийн шалгалтыг хийж чадаагүй бол амжилттай гэж зарлахгүй
+        state.safety_lock = True
+        send_telegram(
+            format_block(
+                "FINAL SAFETY CHECK UNVERIFIED",
+                "🚨",
+                [("Статус", "Позиц шалгагдсангүй — шинэ trade нээхгүй"), ("Error", str(e)[:200])]
+            )
+        )
+        return False
+
     if final_positions:
         state.safety_lock = True
         send_telegram(
@@ -2193,7 +2246,14 @@ def execute_post_news_trade():
 # ==========================================================
 
 def monitor_positions():
-    positions = get_positions()
+    try:
+        positions = get_positions()
+    except PositionFetchError as e:
+        # Позицын жагсаалт тодорхойгүй бол юу ч хаагдсан гэж үзэхгүй — эс тэгвээс
+        # хамгаалалтын захиалгуудыг амьд позиц дээрээс цуцалчихна.
+        print(f"⚠️ Monitor: позиц уншиж чадсангүй — энэ мөчлөгийг алгаслаа ({e})")
+        return
+
     current_symbols = {p["symbol"] for p in positions}
     tracked_symbols = set(state.active_trade_info.keys())
 
@@ -2340,7 +2400,14 @@ def send_cycle_summary():
 def safety_recovery():
     if not state.safety_lock:
         return True
-    positions = get_positions()
+    try:
+        positions = get_positions()
+    except PositionFetchError as e:
+        # Позиц үлдсэн эсэхийг мэдэхгүй бол түгжээг тайлахгүй — тайлчихвал
+        # хамгаалалтгүй позиц дээр шинэ арилжаа нэмэгдэх эрсдэлтэй.
+        print(f"⚠️ Safety recovery: позиц уншиж чадсангүй — түгжээ хэвээр ({e})")
+        return False
+
     if not positions:
         state.safety_lock = False
         send_telegram(

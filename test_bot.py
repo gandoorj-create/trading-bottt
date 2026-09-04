@@ -1251,3 +1251,151 @@ class TestScreenCoins:
         selected = bot.screen_coins()
 
         assert [c["symbol"] for c in selected] == ["ETHUSDT"]
+
+
+# ----------------------------------------------------------------
+# API алдааг "позиц байхгүй" гэж андуурахгүй байх
+#
+# send_signed_request нь сүлжээний алдаанд {"code": -9999} буцаадаг. Өмнө нь
+# get_positions үүнийг хоосон жагсаалт болгож хувиргадаг байсан тул нэг л
+# сүлжээний саатал дараах гинжин урвалыг өдөөж байв:
+#   амьд позицууд "хаагдсан" болно → SL/TP цуцлагдана → хөтлөлтөөс хасагдана
+# ----------------------------------------------------------------
+
+def _api_failure(*args, **kwargs):
+    return {"code": -9999, "msg": "Connection timeout"}
+
+
+class TestGetPositionsFailure:
+    def test_api_error_raises_instead_of_empty_list(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request", _api_failure)
+
+        with pytest.raises(bot.PositionFetchError):
+            bot.get_positions()
+
+    def test_genuinely_empty_list_is_not_an_error(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request", lambda *a, **kw: [])
+
+        assert bot.get_positions() == []
+
+    def test_zero_amount_positions_are_filtered(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request", lambda *a, **kw: [
+            {"symbol": "BTCUSDT", "positionAmt": "0", "entryPrice": "0"},
+            {"symbol": "ETHUSDT", "positionAmt": "1.5", "entryPrice": "100",
+             "markPrice": "105", "unRealizedProfit": "7.5"},
+        ])
+
+        positions = bot.get_positions()
+
+        assert [p["symbol"] for p in positions] == ["ETHUSDT"]
+
+
+class TestMonitorPositionsOnApiFailure:
+    def test_open_trades_are_not_treated_as_closed(self, monkeypatch, monitor_env):
+        monkeypatch.setattr(bot, "send_signed_request", _api_failure)
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
+
+        bot.monitor_positions()
+
+        assert monitor_env == []
+        assert "BTCUSDT" in bot.state.active_trade_info
+
+    def test_protection_orders_are_not_cancelled(self, monkeypatch, monitor_env):
+        cancelled = []
+        monkeypatch.setattr(bot, "cancel_all_symbol_orders", lambda symbol: cancelled.append(symbol))
+        monkeypatch.setattr(bot, "send_signed_request", _api_failure)
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
+
+        bot.monitor_positions()
+
+        assert cancelled == []
+
+
+class TestCloseAllOnApiFailure:
+    def test_unreadable_positions_do_not_report_success(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request", _api_failure)
+
+        assert bot.close_all_positions_and_verify() is False
+
+    def test_verify_failure_does_not_report_all_closed(self, monkeypatch):
+        # Эхний унших нь амжилттай (1 позиц), баталгаажуулах уншилтууд алдаатай
+        calls = {"n": 0}
+
+        def flaky(method, endpoint, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return [{"symbol": "BTCUSDT", "positionAmt": "1", "entryPrice": "100",
+                         "markPrice": "100", "unRealizedProfit": "0"}]
+            return {"code": -9999, "msg": "Connection timeout"}
+
+        monkeypatch.setattr(bot, "send_signed_request", flaky)
+        monkeypatch.setattr(bot, "cancel_all_symbol_orders", lambda symbol: None)
+        monkeypatch.setattr(bot, "close_one_position", lambda pos: None)
+        monkeypatch.setattr(bot, "CLOSE_VERIFY_ATTEMPTS", 2)
+        monkeypatch.setattr(bot, "CLOSE_VERIFY_DELAY_SEC", 0)
+        monkeypatch.setattr(bot.time, "sleep", lambda seconds: None)
+
+        assert bot.close_all_positions_and_verify() is False
+
+
+class TestSafetyRecoveryOnApiFailure:
+    def test_lock_is_not_released_when_positions_unreadable(self, monkeypatch):
+        bot.state.safety_lock = True
+        monkeypatch.setattr(bot, "send_signed_request", _api_failure)
+
+        assert bot.safety_recovery() is False
+        assert bot.state.safety_lock is True
+
+    def test_lock_released_when_genuinely_flat(self, monkeypatch, telegram_messages):
+        bot.state.safety_lock = True
+        monkeypatch.setattr(bot, "send_signed_request", lambda *a, **kw: [])
+
+        assert bot.safety_recovery() is True
+        assert bot.state.safety_lock is False
+
+
+class TestTargetReachedOnApiFailure:
+    def test_unverified_final_check_is_not_success(self, monkeypatch, target_env, telegram_messages):
+        monkeypatch.setattr(bot.state, "active_trade_info", {"BTCUSDT": _trade_info()})
+        monkeypatch.setattr(bot, "close_all_positions_and_verify", lambda: True)
+        monkeypatch.setattr(bot, "send_signed_request", _api_failure)
+
+        assert bot.handle_target_reached(310.0) is False
+        assert bot.state.safety_lock is True
+        assert any("UNVERIFIED" in m for m in telegram_messages)
+
+
+class TestOrderPathSurvivesApiFailure:
+    def test_trailing_activation_falls_back_to_entry_price(self, monkeypatch, fake_symbol_info):
+        monkeypatch.setattr(bot, "send_signed_request", _api_failure)
+        monkeypatch.setattr(bot, "TRAILING_ACTIVATION_PCT", 1.0)
+
+        activation = bot.calculate_trailing_activation("BTCUSDT", "BUY", 100.0)
+
+        # Алдаа шидэхгүй — хамгаалалтын захиалга үүсэх боломжтой хэвээр
+        assert activation > 100.0
+
+    def test_filled_order_still_gets_protection_when_positions_unreadable(
+        self, monkeypatch, order_spy, fake_symbol_info, telegram_messages
+    ):
+        protections = []
+        monkeypatch.setattr(bot, "get_position_mode", lambda: False)
+        monkeypatch.setattr(bot, "current_timestamp_ms", lambda: 1_700_000_000_000)
+        monkeypatch.setattr(bot, "rebuild_protection_orders",
+                            lambda symbol, side, qty, entry, pos_side:
+                                protections.append(symbol) or (True, 103.0, 101.0))
+        monkeypatch.setattr(bot.time, "sleep", lambda seconds: None)
+        # Захиалгын өмнөх уншилт OK, захиалгын дараах уншилт алдаатай
+        calls = {"n": 0}
+
+        def flaky(method, endpoint, *a, **kw):
+            calls["n"] += 1
+            return [] if calls["n"] == 1 else {"code": -9999, "msg": "timeout"}
+
+        monkeypatch.setattr(bot, "send_signed_request", flaky)
+
+        bot.execute_trades([_coin()], total_balance=1000.0)
+
+        assert len(order_spy) == 1
+        assert protections == ["BTCUSDT"]
+        assert "BTCUSDT" in bot.state.active_trade_info
