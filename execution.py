@@ -136,12 +136,6 @@ def execute_trades(selected_coins, total_balance):
             entry_price = price
         opened_at_ms = binance_client.current_timestamp_ms()
 
-        state.dca_info[symbol] = {
-            "level": 0,
-            "avg_price": entry_price,
-            "base_qty": actual_quantity,
-            "total_qty": actual_quantity
-        }
 
         success, tp_price, activation_price = position_manager.rebuild_protection_orders(symbol, signal, actual_quantity, entry_price, actual_position_side)
         if not success:
@@ -156,8 +150,6 @@ def execute_trades(selected_coins, total_balance):
             except Exception:
                 pass
             existing_symbols.discard(symbol)
-            if symbol in state.dca_info:
-                del state.dca_info[symbol]
             pnl = account.get_trade_realized_pnl(symbol, opened_at_ms)
             risk.record_realized_pnl(strategy, pnl)
             notifications.send_telegram(format_block("EMERGENCY CLOSED", "⚠️", [("Symbol", symbol), ("PnL", money(pnl))]))

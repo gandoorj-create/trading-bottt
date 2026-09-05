@@ -283,11 +283,5 @@ def screen_coins():
     for i, coin in enumerate(selected, 1):
         log.info(f"{i}. {coin['symbol']} | {coin['strategy']} | {coin['signal']} | Score={coin['score']:.2f}")
 
-    if CHART_SEND_ON_SIGNAL:
-        for coin in selected:
-            symbol = coin['symbol']
-            df = market_data.get_klines(symbol, "1h", 200)
-            reports.send_chart(symbol, df, coin['signal'], coin['score'])
-
     reports.send_selection_report(selected, strategy_candidates, skipped_reasons)
     return selected

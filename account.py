@@ -61,11 +61,6 @@ def get_positions():
     return positions
 
 
-def get_total_unrealized():
-    positions = get_positions()
-    return sum(p["unRealizedProfit"] for p in positions)
-
-
 def get_trade_realized_pnl(symbol, opened_at_ms):
     try:
         start_time = max(0, int(opened_at_ms) - 5000)

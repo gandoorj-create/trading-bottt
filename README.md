@@ -140,8 +140,8 @@ python bot.py
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -v                                    # 228 тест
-pytest --cov=bot --cov=state --cov-report=term-missing
+pytest -v                                    # 234 тест
+pytest --cov=. --cov-report=term-missing
 ```
 
 Тестүүд сүлжээ рүү огт хандахгүй: `conftest.py` дэх autouse fixture нь `requests`-ийг
@@ -184,32 +184,32 @@ Volume холбогдсон үед log нь `/data/bot.log` руу ч бичиг
 
 | Файл | Мөр | Юу байдаг |
 |---|---:|---|
-| `bot.py` | 278 | Оруулах цэг: тохиргоо шалгах, эхлүүлэх, үндсэн давталт |
+| `bot.py` | 276 | Оруулах цэг: тохиргоо шалгах, эхлүүлэх, үндсэн давталт |
 | **Гүйцэтгэл** | | |
-| `execution.py` | 207 | Сонгогдсон signal-уудыг захиалга болгох |
-| `position_manager.py` | 485 | Позицын амьдралын мөчлөг: хамгаалалт, хяналт, хаалт, сэргээлт |
-| `screening.py` | 293 | Coin шинжлэх, корреляци, циклийн сонголт |
+| `execution.py` | 199 | Сонгогдсон signal-уудыг захиалга болгох |
+| `position_manager.py` | 468 | Позицын амьдралын мөчлөг: хамгаалалт, хяналт, хаалт, сэргээлт |
+| `screening.py` | 287 | Coin шинжлэх, корреляци, циклийн сонголт |
 | **Шийдвэр** | | |
-| `strategies.py` | 168 | Зах зээлийн горим, стратеги бүрийн signal ба оноо |
-| `indicators.py` | 135 | Техникийн индикаторууд (гадаад хамааралгүй, цэвэр функцууд) |
+| `strategies.py` | 167 | Зах зээлийн горим, стратеги бүрийн signal ба оноо |
+| `indicators.py` | 133 | Техникийн индикаторууд (гадаад хамааралгүй, цэвэр функцууд) |
 | `risk.py` | 118 | Drawdown breaker, стратегийн түр зогсоолт, realized PnL бүртгэл |
 | **Биржийн давхарга** | | |
-| `order_api.py` | 210 | Захиалга байрлуулах/цуцлах (conditional захиалга Algo service дээр) |
-| `account.py` | 121 | Данс, позиц, leverage, realized PnL |
-| `market_data.py` | 184 | Klines, exchange info, тоймлолт, min notional |
-| `binance_client.py` | 117 | REST давхарга: гарын үсэг, хүсэлт, rate limit, серверийн цаг |
+| `order_api.py` | 209 | Захиалга байрлуулах/цуцлах (conditional захиалга Algo service дээр) |
+| `account.py` | 141 | Данс, позиц, leverage, realized PnL |
+| `market_data.py` | 173 | Klines, exchange info, тоймлолт, min notional |
+| `binance_client.py` | 116 | REST давхарга: гарын үсэг, хүсэлт, rate limit, серверийн цаг |
 | **Дэд бүтэц** | | |
-| `state.py` | 90 | Runtime state (`BotState` объект) — нэг эх сурвалж |
-| `settings.py` | 134 | `.env` + `config.json`-оос тохиргоо ачаалах |
+| `state.py` | 89 | Runtime state (`BotState` объект) — нэг эх сурвалж |
+| `settings.py` | 120 | `.env` + `config.json`-оос тохиргоо ачаалах |
 | `persistence.py` | 127 | State файлуудыг унших/бичих |
 | `logging_setup.py` | 68 | Log тохиргоо (консол + volume дээрх файл) |
-| `notifications.py` | 55 | Telegram илгээлт |
-| `reports.py` | 145 | Telegram тайлангууд ба график |
+| `notifications.py` | 35 | Telegram илгээлт |
+| `reports.py` | 94 | Telegram тайлангууд |
 | `telegram_format.py` | — | Telegram мессежийн формат |
-| `utils.py` | 39 | Жижиг туслахууд (safe_float, clamp, round_down…) |
+| `utils.py` | 37 | Жижиг туслахууд (safe_float, clamp, round_down…) |
 | **Нэмэлт** | | |
-| `news.py` | 150 | Мэдээний цагийн хуваарь ба дараах арилжаа |
-| `backtest.py` | 138 | Түүхэн өгөгдөл дээр стратеги турших |
+| `news.py` | 149 | Мэдээний цагийн хуваарь ба дараах арилжаа |
+| `backtest.py` | 137 | Түүхэн өгөгдөл дээр стратеги турших |
 | `test_bot.py`, `conftest.py` | — | Тестүүд |
 
 ### Модуль хооронд хэрхэн дууддаг вэ

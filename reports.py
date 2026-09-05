@@ -1,69 +1,18 @@
 """
 reports.py
-Telegram тайлангууд ба график.
+Telegram тайлангууд.
 """
-import io
-import matplotlib.pyplot as plt
 import time
 from telegram_format import format_block, format_section, money
 from datetime import datetime
 from settings import *
 from state import state
 import account
-import indicators
 import notifications
 import risk
 from logging_setup import get_logger
 
 log = get_logger(__name__)
-
-
-def send_chart(symbol, df, signal=None, score=None):
-    if not CHART_ENABLED:
-        return False
-    try:
-        df_plot = df.tail(100).copy()
-        if len(df_plot) < 20:
-            return False
-        
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        ax.plot(df_plot.index, df_plot["close"], color='blue', linewidth=1.5, label='Close')
-        
-        ema20 = indicators.calculate_ema(df_plot, 20)
-        ema50 = indicators.calculate_ema(df_plot, 50)
-        ax.plot(df_plot.index, ema20, color='orange', linestyle='--', linewidth=1, label='EMA 20')
-        ax.plot(df_plot.index, ema50, color='red', linestyle='--', linewidth=1, label='EMA 50')
-        
-        upper, middle, lower = indicators.calculate_bollinger(df_plot)
-        ax.fill_between(df_plot.index, upper, lower, alpha=0.1, color='gray')
-        ax.plot(df_plot.index, upper, color='gray', linestyle=':', linewidth=0.8)
-        ax.plot(df_plot.index, lower, color='gray', linestyle=':', linewidth=0.8)
-        
-        if signal:
-            last_price = df_plot["close"].iloc[-1]
-            if signal == "BUY":
-                ax.scatter(df_plot.index[-1], last_price, color='green', s=100, marker='^', label='BUY')
-            elif signal == "SELL":
-                ax.scatter(df_plot.index[-1], last_price, color='red', s=100, marker='v', label='SELL')
-        
-        title = f"{symbol} | {signal if signal else 'No Signal'}"
-        if score:
-            title += f" | Score: {score:.2f}"
-        ax.set_title(title, fontsize=12)
-        ax.legend(loc='upper left')
-        ax.grid(True, alpha=0.3)
-        
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-        buf.seek(0)
-        plt.close(fig)
-        
-        caption = f"📊 {symbol} | Signal: {signal}" if signal else f"📊 {symbol}"
-        return notifications.send_telegram_photo(buf.getvalue(), caption)
-    except Exception as e:
-        log.error(f"❌ Chart generation error: {e}")
-        return False
 
 
 def send_selection_report(selected, all_candidates=None, skipped_reasons=None):

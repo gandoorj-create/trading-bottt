@@ -65,25 +65,11 @@ STRATEGY_PERFORMANCE_TRACKING = _cfg["strategy_performance_tracking"]
 CONSECUTIVE_LOSS_LIMIT = _cfg["consecutive_loss_limit"]
 STRATEGY_COOLDOWN_CYCLES = _cfg["strategy_cooldown_cycles"]
 
-# ---- DCA ----
-DCA_ENABLED = _cfg.get("dca_enabled", False)
-DCA_LEVELS = _cfg.get("dca_levels", 2)
-DCA_TRIGGER_PCT = _cfg.get("dca_trigger_pct", 2.0)
-DCA_MULTIPLIER = _cfg.get("dca_multiplier", 1.0)
-
 # ---- Correlation ----
 CORRELATION_ENABLED = _cfg["correlation_enabled"]
 CORRELATION_THRESHOLD = _cfg["correlation_threshold"]
 CORRELATION_LOOKBACK = _cfg["correlation_lookback"]
 CORRELATION_CACHE_TTL = _cfg.get("correlation_cache_ttl", 3600)
-
-# ---- Order Book ----
-ORDER_BOOK_ENABLED = _cfg.get("order_book_enabled", True)
-ORDER_BOOK_LIMIT = _cfg.get("order_book_limit", 20)
-
-# ---- Chart ----
-CHART_ENABLED = _cfg.get("chart_enabled", True)
-CHART_SEND_ON_SIGNAL = _cfg.get("chart_send_on_signal", True)
 
 # ---- Backtesting ----
 BACKTEST_ENABLED = _cfg.get("backtest_enabled", False)

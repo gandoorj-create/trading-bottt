@@ -65,7 +65,6 @@ class BotState:
 
         # ---- Нээлттэй арилжаа ----
         self.active_trade_info = {}
-        self.dca_info = {}
 
         # ---- Cache ----
         self.leverage_cache = {}

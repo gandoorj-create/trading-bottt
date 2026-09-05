@@ -36,21 +36,10 @@
   "consecutive_loss_limit": 3,
   "strategy_cooldown_cycles": 6,
 
-  "dca_enabled": false,
-  "dca_levels": 2,
-  "dca_trigger_pct": 2.0,
-  "dca_multiplier": 1.0,
-
   "correlation_enabled": true,
   "correlation_threshold": 0.85,
   "correlation_lookback": 50,
   "correlation_cache_ttl": 14400,
-
-  "order_book_enabled": true,
-  "order_book_limit": 20,
-
-  "chart_enabled": true,
-  "chart_send_on_signal": true,
 
   "backtest_enabled": false,
   "backtest_days": 30,

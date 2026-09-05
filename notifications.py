@@ -33,21 +33,3 @@ def send_telegram(text, pin=False):
     except Exception as e:
         log.error(f"❌ Telegram exception: {e}")
         return False
-
-
-def send_telegram_photo(photo_bytes, caption=""):
-    if not BOT_TOKEN or not CHAT_ID:
-        return False
-    try:
-        url = f"{TELEGRAM_API_ROOT}/bot{BOT_TOKEN}/sendPhoto"
-        files = {'photo': ('chart.png', photo_bytes, 'image/png')}
-        data = {'chat_id': CHAT_ID, 'caption': caption}
-        response = requests.post(url, files=files, data=data, timeout=15)
-        if response.status_code == 200:
-            return True
-        else:
-            log.error(f"❌ Photo send error: {response.text}")
-            return False
-    except Exception as e:
-        log.error(f"❌ Photo exception: {e}")
-        return False

@@ -32,7 +32,7 @@ def main():
     log_path = setup_logging(STATE_DIR, STATE_DIR_IS_PERSISTENT)
 
     log.info("=" * 70)
-    log.info("🤖 SMART BOT V2 (SUPERTREND + CHOP + MTF + VWAP + FUNDING + ORDERBOOK + CHART)")
+    log.info("🤖 SMART BOT V2 (SUPERTREND + CHOP + MTF + VWAP + FUNDING)")
     log.info("🎯 UNREALIZED $300 → REALIZED")
     log.info("😴 10 MIN COOLDOWN")
     log.info("🔄 AUTO RESUME")
@@ -96,8 +96,6 @@ def main():
                 ("Regime", "CHOP Index (38.2/61.8)"),
                 ("Trend Signal", "Supertrend (EMA-г орлосон)"),
                 ("Filters", "MTF (4h/1h) + VWAP + Funding Rate"),
-                ("Order Book", "Strong levels detection"),
-                ("Chart", "Telegram chart on signal"),
                 ("Leverage", f"{LEVERAGE}x"),
                 ("Allocation", f"{TRADE_ALLOCATION * 100:.0f}%"),
                 ("Target", f"${TARGET_PROFIT:.2f}"),

@@ -74,7 +74,6 @@ def no_telegram(monkeypatch):
     """Telegram илгээлтийг барьж аваад дуудлагыг нь жагсаана."""
     sent = []
     monkeypatch.setattr(notifications, "send_telegram", lambda text, pin=False: sent.append(text))
-    monkeypatch.setattr(notifications, "send_telegram_photo", lambda photo_bytes, caption="": sent.append(caption))
     return sent
 
 

@@ -134,17 +134,6 @@ def get_klines(symbol, interval="1h", limit=200, drop_unclosed=True):
     return df
 
 
-def get_order_book(symbol, limit=20):
-    try:
-        data = binance_client.send_public_request("/fapi/v1/depth", {"symbol": symbol, "limit": limit})
-        bids = [[float(b[0]), float(b[1])] for b in data.get("bids", [])]
-        asks = [[float(a[0]), float(a[1])] for a in data.get("asks", [])]
-        return bids, asks
-    except Exception as e:
-        log.warning(f"⚠️ Order book error {symbol}: {e}")
-        return [], []
-
-
 def find_strong_levels(df, lookback=100):
     """Сүүлийн `lookback` лааны swing доод/дээд түвшин.
 

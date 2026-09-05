@@ -1000,7 +1000,6 @@ def monitor_env(monkeypatch):
     monkeypatch.setattr(position_manager, "finalize_trade",
                         lambda symbol, trade_data: finalized.append(symbol) or 12.5)
     monkeypatch.setattr(order_api, "cancel_all_symbol_orders", lambda symbol: None)
-    monkeypatch.setattr(position_manager, "manage_dca", lambda: None)
     monkeypatch.setattr(account, "get_usdt_balance", lambda: 1000.0)
     monkeypatch.setattr(bot_state, "last_telegram_report_time", 0.0)
     return finalized
@@ -1193,7 +1192,6 @@ def screen_env(monkeypatch):
     monkeypatch.setattr(account, "get_actual_leverage", lambda symbol: 5)
     monkeypatch.setattr(reports, "send_selection_report",
                         lambda selected, all_candidates=None, skipped_reasons=None: None)
-    patch_setting(monkeypatch, "CHART_SEND_ON_SIGNAL", False)
     patch_setting(monkeypatch, "CORRELATION_ENABLED", False)
     patch_setting(monkeypatch, "MIN_SIGNAL_SCORE", 20.0)
     patch_setting(monkeypatch, "MAX_SELECTIONS", 6)
@@ -1568,13 +1566,6 @@ class TestRecoveredTradeFinalization:
         assert bot_state.strategy_stats["RSI_STRATEGY"]["trades"] == 1
         assert bot_state.session_realized_pnl == pytest.approx(40.0)
 
-    def test_dca_info_cleared_on_close(self, monkeypatch):
-        monkeypatch.setattr(account, "get_trade_realized_pnl", lambda symbol, opened_at_ms: 5.0)
-        bot_state.dca_info["BNBUSDT"] = {"level": 1}
-
-        position_manager.finalize_trade("BNBUSDT", _trade_info(strategy="RECOVERED"))
-
-        assert "BNBUSDT" not in bot_state.dca_info
 
 
 class TestStrategyRestoreAcrossRestart:

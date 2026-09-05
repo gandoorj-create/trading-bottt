@@ -69,13 +69,6 @@ def sync_existing_positions():
             "recovered": True
         }
 
-        state.dca_info[symbol] = {
-            "level": 0,
-            "avg_price": entry,
-            "base_qty": qty,
-            "total_qty": qty
-        }
-
         if not has_protection:
             log.info(f"🔄 RECOVERED {symbol} WITHOUT protection – rebuilding...")
             success, _, _ = rebuild_protection_orders(symbol, side, qty, entry, position_side)
@@ -106,8 +99,6 @@ def finalize_trade(symbol, trade_data):
             ]
         )
     )
-    if symbol in state.dca_info:
-        del state.dca_info[symbol]
     return pnl
 
 
@@ -179,11 +170,6 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
 
     state.unprotected_symbols.discard(symbol)
     return True, tp_price, activation_price
-
-
-def manage_dca():
-    if not DCA_ENABLED:
-        return
 
 
 def close_one_position(pos):
@@ -399,8 +385,6 @@ def monitor_positions():
     if not positions:
         return
 
-    manage_dca()
-
     now = time.time()
     if now - state.last_telegram_report_time < TELEGRAM_REPORT_INTERVAL_SEC:
         return
@@ -414,9 +398,8 @@ def monitor_positions():
         trade_data = state.active_trade_info.get(symbol, {})
         strategy = trade_data.get("strategy", "UNKNOWN")
         side = trade_data.get("side", "UNKNOWN")
-        dca_level = state.dca_info.get(symbol, {}).get("level", 0)
         sections.append((
-            f"🔹 {symbol} ({side}) [DCA: {dca_level}/{DCA_LEVELS}]",
+            f"🔹 {symbol} ({side})",
             [
                 ("Strategy", strategy),
                 ("Entry", f"${pos['entryPrice']:,.6f}"),
