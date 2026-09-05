@@ -75,6 +75,9 @@ class BotState:
         self.position_mode_cache = None
         self.server_time_offset_ms = 0
         self.last_telegram_report_time = 0
+        # Algo (conditional) захиалга жагсаах endpoint: None = хараахан хайгаагүй,
+        # "" = хайсан боловч ажиллах хувилбар олдсонгүй
+        self.algo_list_endpoint = None
 
         # ---- News trading ----
         self.news_mode_active = False

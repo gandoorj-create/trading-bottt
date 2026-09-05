@@ -610,10 +610,99 @@ def place_take_profit_order(symbol, side, quantity, tp_price, position_side=None
 def cancel_all_orders(symbol):
     return send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 
+# Conditional (SL / TP / trailing) захиалгууд Algo service дээр байрладаг.
+# Байрлуулах зам нь батлагдсан (POST /fapi/v1/algoOrder), харин жагсаах замын
+# нэр нь тодорхойгүй: өмнө хэрэглэж байсан /fapi/v1/algoOpenOrders нь
+# -5000 "Path is invalid" буцаадаг. Тиймээс ажиллах хувилбарыг эхний
+# хэрэглээнд туршиж олоод кэшилнэ. Буруу зам зүгээр л алдаа буцаана — хор хөнөөлгүй.
+ALGO_LIST_ENDPOINT_CANDIDATES = [
+    "/fapi/v1/openAlgoOrders",
+    "/fapi/v1/algoOrders",
+    "/fapi/v1/algoOpenOrders",
+    "/fapi/v1/openOrders",
+]
+
+CONDITIONAL_ORDER_TYPES = (
+    "STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT", "TRAILING_STOP_MARKET",
+)
+
+
+def _extract_order_list(data):
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("orders", "data", "algoOrders"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return None
+
+
+def discover_algo_list_endpoint(symbol):
+    """Algo захиалга жагсаах ажиллах endpoint-ыг нэг удаа олж кэшилнэ."""
+    if state.algo_list_endpoint is not None:
+        return state.algo_list_endpoint or None
+
+    for endpoint in ALGO_LIST_ENDPOINT_CANDIDATES:
+        orders = _extract_order_list(send_signed_request("GET", endpoint, {"symbol": symbol}))
+        if orders is None:
+            continue
+        state.algo_list_endpoint = endpoint
+        print(f"✅ Algo order жагсаах endpoint олдлоо: {endpoint}")
+        return endpoint
+
+    # Үр дүнг кэшилсэн тул энэ хэсэг сесс тутамд нэг л удаа ажиллана
+    state.algo_list_endpoint = ""
+    print("🚨 Algo order жагсаах endpoint олдсонгүй — SL/TP цуцлалт ажиллахгүй")
+    send_telegram(format_block("ALGO ORDER ENDPOINT ОЛДСОНГҮЙ", "🚨", [
+        ("Туршсан", ", ".join(ALGO_LIST_ENDPOINT_CANDIDATES)),
+        ("Үр дагавар", "Хуучин SL/TP цуцлагдахгүй — давхардаж хуримтлагдана"),
+    ]))
+    return None
+
+
+def get_open_algo_orders(symbol):
+    """Тухайн symbol дээрх нээлттэй conditional захиалгууд.
+
+    None буцаах нь "мэдэхгүй" гэсэн утга — "байхгүй" гэсэн утгатай хольж
+    болохгүй (тэгвэл хамгаалалтгүй позицыг хамгаалалттай гэж андуурна).
+    """
+    endpoint = discover_algo_list_endpoint(symbol)
+    if not endpoint:
+        return None
+    orders = _extract_order_list(send_signed_request("GET", endpoint, {"symbol": symbol}))
+    if orders is None:
+        return None
+    return [
+        o for o in orders
+        if o.get("symbol") == symbol
+        and (o.get("orderType") or o.get("type")) in CONDITIONAL_ORDER_TYPES
+    ]
+
+
 def cancel_all_algo_orders(symbol):
-    # Conditional orders live in the separate Algo service since 2025-12-09;
-    # allOpenOrders does not touch them. One-shot cancel-all for the symbol.
-    return send_signed_request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+    """Conditional захиалгуудыг нэг бүрчлэн цуцална.
+
+    Bulk cancel-ийн зам тодорхойгүй тул байрлуулахад ашигладаг ижил нөөц
+    (/fapi/v1/algoOrder) дээр нэг бүрчлэн цуцална.
+    """
+    orders = get_open_algo_orders(symbol)
+    if orders is None:
+        return {"code": -9998, "msg": "algo order list endpoint unknown"}
+
+    results = []
+    for order in orders:
+        params = {"symbol": symbol}
+        if order.get("algoId") is not None:
+            params["algoId"] = order["algoId"]
+        elif order.get("orderId") is not None:
+            params["orderId"] = order["orderId"]
+        else:
+            continue
+        result = send_signed_request("DELETE", "/fapi/v1/algoOrder", params)
+        if is_api_error(result):
+            print(f"⚠️ {symbol}: algo order цуцлагдсангүй {params}: {result}")
+        results.append(result)
+    return results
 
 def cancel_all_symbol_orders(symbol):
     normal = cancel_all_orders(symbol)
@@ -1503,13 +1592,10 @@ def sync_existing_positions():
             opened_at = time.time()
             opened_at_ms = int(opened_at * 1000)
 
-        algo_orders = send_signed_request("GET", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
-        has_protection = False
-        if isinstance(algo_orders, list):
-            for order in algo_orders:
-                if order.get("symbol") == symbol and order.get("orderType") in ("TRAILING_STOP_MARKET", "STOP_MARKET", "TAKE_PROFIT_MARKET"):
-                    has_protection = True
-                    break
+        # None = жагсаалт уншигдсангүй. Тэр тохиолдолд "хамгаалалттай" гэж
+        # таамаглахгүй — хамгаалалтгүй позиц үлдэхээс давхардсан SL/TP дээр нь.
+        existing_protection = get_open_algo_orders(symbol)
+        has_protection = bool(existing_protection)
 
         state.active_trade_info[symbol] = {
             "strategy": strategy,
@@ -1714,7 +1800,11 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
     if tp_price is None or emergency_sl_price is None:
         return False, None, None
 
-    cancel_all_symbol_orders(symbol)
+    # Хуучин SL/TP-г эхлээд цэвэрлэнэ. Цуцлалт бүтэхгүй бол шинэ захиалга дээр нь
+    # нэмэгдэж, хуучин үнийн түвшний stop амьд үлдэнэ — тиймээс чимээгүй өнгөрөхгүй.
+    cleanup = cancel_all_symbol_orders(symbol)
+    if is_api_error(cleanup.get("algo")):
+        print(f"⚠️ {symbol}: хуучин conditional захиалгууд цуцлагдсангүй: {cleanup['algo']}")
 
     # 1) Hard emergency stop — ALWAYS required. A trailing stop only arms after
     #    price moves in our favour by TRAILING_ACTIVATION_PCT, so a position that

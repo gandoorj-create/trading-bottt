@@ -1605,3 +1605,195 @@ class TestStateStorageCheck:
 
         assert bot.check_state_storage() is False
         assert any("STATE STORAGE АЛДАА" in m for m in telegram_messages)
+
+
+# ----------------------------------------------------------------
+# Algo (conditional) захиалгын endpoint
+#
+# /fapi/v1/algoOpenOrders нь -5000 "Path is invalid" буцаадаг тул хуучин SL/TP
+# хэзээ ч цуцлагддаггүй, мөн бүх позиц "хамгаалалтгүй" мэт харагддаг байв.
+# ----------------------------------------------------------------
+
+def _algo_order(order_id=101, order_type="STOP_MARKET", symbol="BTCUSDT", id_field="algoId"):
+    return {"symbol": symbol, id_field: order_id, "orderType": order_type}
+
+
+def _invalid_path(*args, **kwargs):
+    return {"code": -5000, "msg": "Path is invalid"}
+
+
+class TestAlgoEndpointDiscovery:
+    def test_first_working_candidate_is_used(self, monkeypatch):
+        tried = []
+
+        def api(method, endpoint, params=None, **kw):
+            tried.append(endpoint)
+            if endpoint == "/fapi/v1/algoOrders":
+                return [_algo_order()]
+            return {"code": -5000, "msg": "Path is invalid"}
+
+        monkeypatch.setattr(bot, "send_signed_request", api)
+
+        assert bot.discover_algo_list_endpoint("BTCUSDT") == "/fapi/v1/algoOrders"
+        assert tried[0] == "/fapi/v1/openAlgoOrders"  # эхний хувилбараас эхэлнэ
+
+    def test_result_is_cached(self, monkeypatch):
+        calls = {"n": 0}
+
+        def api(method, endpoint, params=None, **kw):
+            calls["n"] += 1
+            return [] if endpoint == "/fapi/v1/openAlgoOrders" else _invalid_path()
+
+        monkeypatch.setattr(bot, "send_signed_request", api)
+
+        bot.discover_algo_list_endpoint("BTCUSDT")
+        before = calls["n"]
+        bot.discover_algo_list_endpoint("BTCUSDT")
+
+        assert calls["n"] == before
+
+    def test_no_working_endpoint_alerts_once(self, monkeypatch, telegram_messages):
+        monkeypatch.setattr(bot, "send_signed_request", _invalid_path)
+
+        assert bot.discover_algo_list_endpoint("BTCUSDT") is None
+        bot.discover_algo_list_endpoint("BTCUSDT")  # 2 дахь удаа
+
+        assert len([m for m in telegram_messages if "ENDPOINT ОЛДСОНГҮЙ" in m]) == 1
+
+    def test_wrapped_list_response_is_accepted(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request",
+                            lambda m, e, p=None, **kw: {"orders": [_algo_order()]}
+                            if e == "/fapi/v1/openAlgoOrders" else _invalid_path())
+
+        assert bot.discover_algo_list_endpoint("BTCUSDT") == "/fapi/v1/openAlgoOrders"
+
+
+class TestGetOpenAlgoOrders:
+    def test_returns_only_conditional_orders_for_symbol(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request", lambda m, e, p=None, **kw: [
+            _algo_order(1, "STOP_MARKET"),
+            _algo_order(2, "TAKE_PROFIT_MARKET"),
+            _algo_order(3, "LIMIT"),                      # conditional биш
+            _algo_order(4, "STOP_MARKET", symbol="ETHUSDT"),  # өөр symbol
+        ] if e == "/fapi/v1/openAlgoOrders" else _invalid_path())
+
+        orders = bot.get_open_algo_orders("BTCUSDT")
+
+        assert [o["algoId"] for o in orders] == [1, 2]
+
+    def test_unknown_endpoint_returns_none_not_empty(self, monkeypatch):
+        # None = "мэдэхгүй", [] = "байхгүй" — хоёрыг хольж болохгүй
+        monkeypatch.setattr(bot, "send_signed_request", _invalid_path)
+
+        assert bot.get_open_algo_orders("BTCUSDT") is None
+
+    def test_fetch_failure_after_discovery_returns_none(self, monkeypatch):
+        # Endpoint нь олдсон ч дараагийн уншилт нь сүлжээний алдаанд унасан тохиолдол —
+        # энэ нь "SL/TP байхгүй" гэсэн утга биш
+        calls = {"n": 0}
+
+        def api(method, endpoint, params=None, **kw):
+            if endpoint != "/fapi/v1/openAlgoOrders":
+                return _invalid_path()
+            calls["n"] += 1
+            return [] if calls["n"] == 1 else {"code": -9999, "msg": "Connection timeout"}
+
+        monkeypatch.setattr(bot, "send_signed_request", api)
+        bot.discover_algo_list_endpoint("BTCUSDT")  # эхлээд endpoint-оо олно
+
+        assert bot.get_open_algo_orders("BTCUSDT") is None
+
+    def test_genuinely_no_orders_returns_empty_list(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request",
+                            lambda m, e, p=None, **kw: [] if e == "/fapi/v1/openAlgoOrders"
+                            else _invalid_path())
+
+        assert bot.get_open_algo_orders("BTCUSDT") == []
+
+
+class TestCancelAlgoOrders:
+    def test_cancels_each_order_individually(self, monkeypatch):
+        deleted = []
+
+        def api(method, endpoint, params=None, **kw):
+            if method == "GET" and endpoint == "/fapi/v1/openAlgoOrders":
+                return [_algo_order(1), _algo_order(2, "TAKE_PROFIT_MARKET")]
+            if method == "DELETE" and endpoint == "/fapi/v1/algoOrder":
+                deleted.append(params)
+                return {"status": "CANCELED"}
+            return _invalid_path()
+
+        monkeypatch.setattr(bot, "send_signed_request", api)
+
+        bot.cancel_all_algo_orders("BTCUSDT")
+
+        assert [p["algoId"] for p in deleted] == [1, 2]
+
+    def test_falls_back_to_order_id_field(self, monkeypatch):
+        deleted = []
+
+        def api(method, endpoint, params=None, **kw):
+            if method == "GET" and endpoint == "/fapi/v1/openAlgoOrders":
+                return [_algo_order(77, id_field="orderId")]
+            if method == "DELETE":
+                deleted.append(params)
+                return {"status": "CANCELED"}
+            return _invalid_path()
+
+        monkeypatch.setattr(bot, "send_signed_request", api)
+
+        bot.cancel_all_algo_orders("BTCUSDT")
+
+        assert deleted == [{"symbol": "BTCUSDT", "orderId": 77}]
+
+    def test_unknown_endpoint_reports_api_error(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request", _invalid_path)
+
+        result = bot.cancel_all_algo_orders("BTCUSDT")
+
+        # is_api_error-оор танигдах ёстой — дуудагч нь бүтэлгүйтлийг мэдэх ёстой
+        assert bot.is_api_error(result) is True
+
+    def test_no_open_orders_is_not_an_error(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request",
+                            lambda m, e, p=None, **kw: [] if m == "GET" else _invalid_path())
+
+        result = bot.cancel_all_algo_orders("BTCUSDT")
+
+        assert result == []
+        assert bot.is_api_error(result) is False
+
+
+class TestProtectionDetectionOnRecovery:
+    def _recover(self, monkeypatch, algo_response):
+        rebuilt = []
+        monkeypatch.setattr(bot, "get_positions", lambda: [_position("BTCUSDT")])
+        monkeypatch.setattr(bot, "send_signed_request",
+                            lambda m, e, p=None, **kw: algo_response(m, e))
+        monkeypatch.setattr(bot, "rebuild_protection_orders",
+                            lambda symbol, side, qty, entry, pos_side:
+                                rebuilt.append(symbol) or (True, 103.0, 101.0))
+        bot.sync_existing_positions()
+        return rebuilt
+
+    def test_existing_protection_is_not_rebuilt(self, monkeypatch):
+        rebuilt = self._recover(
+            monkeypatch,
+            lambda m, e: [_algo_order()] if e == "/fapi/v1/openAlgoOrders" else _invalid_path(),
+        )
+
+        assert rebuilt == []
+
+    def test_missing_protection_is_rebuilt(self, monkeypatch):
+        rebuilt = self._recover(
+            monkeypatch,
+            lambda m, e: [] if e == "/fapi/v1/openAlgoOrders" else _invalid_path(),
+        )
+
+        assert rebuilt == ["BTCUSDT"]
+
+    def test_unknown_protection_state_rebuilds(self, monkeypatch):
+        # Мэдэхгүй үед хамгаалалтгүй үлдэхээс давхардсан SL дээр нь
+        rebuilt = self._recover(monkeypatch, lambda m, e: _invalid_path())
+
+        assert rebuilt == ["BTCUSDT"]
