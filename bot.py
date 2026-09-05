@@ -1203,6 +1203,10 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
                     return None
 
         close = df["close"].iloc[-1]
+        if close <= 0:
+            print(f"⚠️ {symbol}: үнэ 0 ирлээ — алгаслаа")
+            return None
+
         adx = calculate_adx(df).iloc[-1]
         rsi = calculate_rsi(df).iloc[-1]
         atr = calculate_atr(df).iloc[-1]
@@ -1769,6 +1773,11 @@ def get_actual_leverage(symbol):
     if is_api_error(result) or not isinstance(result, list) or not result:
         return LEVERAGE
     lev = int(safe_float(result[0].get("leverage", LEVERAGE), LEVERAGE))
+    # safe_float нь "0"-г хүчинтэй тоо гэж үзэх тул default руу шилждэггүй.
+    # Тэглэсэн leverage нь margin тооцоололд 0-д хуваах алдаа өгч бүтэн циклийг унагаана.
+    if lev <= 0:
+        print(f"⚠️ {symbol}: leverage={lev} ирлээ — {LEVERAGE}x гэж үзэв")
+        return LEVERAGE
     state.leverage_cache[symbol] = lev
     return lev
 

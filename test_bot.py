@@ -2008,6 +2008,38 @@ class TestLowScoreDiagnostic:
         assert any("Оноо хэт бага" in r for r in reported["reasons"])
 
 
+class TestDivisionGuards:
+    def test_zero_leverage_falls_back_to_configured(self, monkeypatch):
+        # leverage=0 нь margin тооцоололд 0-д хуваах алдаа өгч циклийг унагаана
+        monkeypatch.setattr(bot, "send_signed_request",
+                            lambda *a, **kw: [{"leverage": "0"}])
+        monkeypatch.setattr(bot, "LEVERAGE", 5)
+
+        assert bot.get_actual_leverage("BTCUSDT") == 5
+
+    def test_valid_leverage_is_used_and_cached(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request",
+                            lambda *a, **kw: [{"leverage": "10"}])
+
+        assert bot.get_actual_leverage("BTCUSDT") == 10
+        assert bot.state.leverage_cache["BTCUSDT"] == 10
+
+    def test_zero_leverage_is_not_cached(self, monkeypatch):
+        monkeypatch.setattr(bot, "send_signed_request",
+                            lambda *a, **kw: [{"leverage": "0"}])
+
+        bot.get_actual_leverage("BTCUSDT")
+
+        assert "BTCUSDT" not in bot.state.leverage_cache
+
+    def test_zero_price_skips_analysis(self, monkeypatch, analyze_env):
+        zero = make_df([0.0] * 260)
+        monkeypatch.setattr(bot, "get_klines", lambda symbol, interval="1h", limit=200, **kw: zero.copy())
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "BULLISH")
+
+        assert bot.analyze_coin("BTCUSDT", check_correlation=False) is None
+
+
 class TestMtfScorePenalty:
     def _score(self, mtf_signal):
         return bot.calculate_strategy_score(
