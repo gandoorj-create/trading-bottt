@@ -1253,15 +1253,20 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
                 elif mtf_signal == "BEARISH" and signal == "BUY":
                     signal = "HOLD"
 
+            # Оноогоор таслахаас өмнөх чиглэлийг хадгална. Үүнгүйгээр
+            # screen_coins дахь "оноо хэт бага" диагностик BUY/SELL хайдаг
+            # мөртлөө HOLD-той тулгардаг тул хэзээ ч юу ч мэдээлдэггүй байв.
+            raw_signal = signal
             if score < MIN_SIGNAL_SCORE:
                 signal = "HOLD"
-                
+
             strategy_results[strategy] = {
                 "strategy": strategy,
                 "symbol": symbol,
                 "price": close,
                 "score": score,
                 "signal": signal,
+                "raw_signal": raw_signal,
                 "adx": adx,
                 "rsi": rsi,
                 "atr_pct": atr_pct,
@@ -1385,7 +1390,7 @@ def screen_coins():
     low_score_signals = []
     for coin in analyses:
         for strategy, result in coin["strategies"].items():
-            if result["signal"] in ["BUY", "SELL"] and result["score"] < MIN_SIGNAL_SCORE:
+            if result.get("raw_signal") in ["BUY", "SELL"] and result["score"] < MIN_SIGNAL_SCORE:
                 low_score_signals.append(f"{result['symbol']} ({strategy}): {result['score']:.1f}")
     if low_score_signals:
         skipped_reasons.append(f"📉 Оноо хэт бага (MIN_SIGNAL_SCORE={MIN_SIGNAL_SCORE}): {', '.join(low_score_signals[:5])}")

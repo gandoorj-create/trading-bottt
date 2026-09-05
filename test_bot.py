@@ -1913,6 +1913,50 @@ class TestMtfFilter:
         assert any(r["signal"] == "SELL" for r in result["strategies"].values())
 
 
+class TestLowScoreDiagnostic:
+    """Оноогоор таслагдсан signal тайланд харагдах ёстой.
+
+    Өмнө нь analyze_coin оноо багадвал signal-ыг HOLD болгодог тул
+    screen_coins дахь шалгалт (BUY/SELL эсэх) хэзээ ч биелдэггүй байв.
+    """
+
+    def test_raw_signal_is_preserved_when_score_is_low(self, monkeypatch, analyze_env):
+        monkeypatch.setattr(bot, "MIN_SIGNAL_SCORE", 1000.0)  # бүгдийг таслана
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "BULLISH")
+        monkeypatch.setattr(bot, "generate_strategy_signal",
+                            lambda strategy, df, sentiment, regime, chop=None: "BUY")
+
+        result = bot.analyze_coin("BTCUSDT", check_correlation=False)
+
+        assert all(r["signal"] == "HOLD" for r in result["strategies"].values())
+        assert all(r["raw_signal"] == "BUY" for r in result["strategies"].values())
+
+    def test_raw_signal_reflects_earlier_filters(self, monkeypatch, analyze_env):
+        # MTF-ээр хаагдсан бол raw_signal ч HOLD байх ёстой — онооны буруу биш
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "BEARISH")
+        monkeypatch.setattr(bot, "generate_strategy_signal",
+                            lambda strategy, df, sentiment, regime, chop=None: "BUY")
+
+        result = bot.analyze_coin("BTCUSDT", check_correlation=False)
+
+        assert all(r["raw_signal"] == "HOLD" for r in result["strategies"].values())
+
+    def test_low_score_signals_are_reported(self, monkeypatch, screen_env):
+        reported = {}
+        monkeypatch.setattr(bot, "send_selection_report",
+                            lambda selected, all_candidates=None, skipped_reasons=None:
+                                reported.update(reasons=skipped_reasons))
+        monkeypatch.setattr(bot, "MIN_SIGNAL_SCORE", 50.0)
+
+        analysis = _analysis("BTCUSDT", {"RSI_STRATEGY": ("HOLD", 30.0)})
+        analysis["strategies"]["RSI_STRATEGY"]["raw_signal"] = "BUY"
+        _use_analyses(monkeypatch, [analysis])
+
+        bot.screen_coins()
+
+        assert any("Оноо хэт бага" in r for r in reported["reasons"])
+
+
 class TestMtfScorePenalty:
     def _score(self, mtf_signal):
         return bot.calculate_strategy_score(
