@@ -76,13 +76,38 @@ def get_trade_realized_pnl(symbol, opened_at_ms):
         })
         if not isinstance(trades, list):
             return 0.0
+        # realizedPnl нь ШИМТГЭЛГҮЙ дүн — Binance шимтгэлийг тусад нь
+        # `commission` талбараар өгдөг. Өмнө нь үүнийг уншдаггүй байсан тул
+        # бүртгэсэн ашиг бодитоос үргэлж өндөр гарч, +$1 gross атлаа сөрөг net
+        # арилжаа ч "хожил" гэж тоологдож win rate хиймлээр өсдөг байв.
+        # Backtest нь харин шимтгэл тооцдог тул хоёр тоо харьцуулагдахгүй байсан.
         pnl = 0.0
+        fees = 0.0
+        foreign_fee_assets = set()
         for trade in trades:
             trade_time = utils.safe_float(trade.get("time"), 0)
             if trade_time < start_time:
                 continue
             pnl += utils.safe_float(trade.get("realizedPnl", 0))
-        return pnl
+
+            commission = utils.safe_float(trade.get("commission", 0))
+            if not commission:
+                continue
+            fee_asset = str(trade.get("commissionAsset") or "").upper()
+            margin_asset = str(trade.get("marginAsset") or "USDT").upper()
+            if fee_asset in ("", margin_asset):
+                fees += commission
+            else:
+                # Жишээ нь BNB-ээр шимтгэл төлсөн бол өөр нэгжтэй тул шууд
+                # хасаж болохгүй — ханшгүйгээр буруу тоо гаргахаас татгалзана.
+                foreign_fee_assets.add(fee_asset)
+
+        if foreign_fee_assets:
+            log.warning(
+                f"⚠️ {symbol}: {', '.join(sorted(foreign_fee_assets))}-ээр төлсөн шимтгэл "
+                f"тооцоонд ороогүй — бүртгэсэн ашиг бага зэрэг өндөр байж болно"
+            )
+        return pnl - fees
     except Exception as e:
         log.error(f"❌ PnL error {symbol}: {e}")
         return 0.0

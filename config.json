@@ -13,10 +13,10 @@
   "trade_allocation": 0.09,
   "leverage": 5,
 
-  "trailing_callback_rate": 0.5,
-  "trailing_activation_pct": 1.0,
-  "take_profit_pct": 3.0,
-  "emergency_sl_pct": 5.0,
+  "trailing_callback_rate": 1.0,
+  "trailing_activation_pct": 3.0,
+  "take_profit_pct": 4.5,
+  "emergency_sl_pct": 3.0,
 
   "target_profit_usdt": 300.0,
   "target_cooldown_sec": 600,

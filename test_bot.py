@@ -2064,6 +2064,69 @@ class TestLoggingSetup:
         assert logging_setup.setup_logging(None, persistent=True) is None
 
 
+class TestRealizedPnlFees:
+    """realizedPnl нь шимтгэлгүй дүн — шимтгэл заавал хасагдах ёстой."""
+
+    def _trades(self, monkeypatch, rows):
+        monkeypatch.setattr(binance_client, "send_signed_request", lambda *a, **kw: rows)
+
+    def test_commission_is_deducted(self, monkeypatch):
+        self._trades(monkeypatch, [
+            {"time": 2000, "realizedPnl": "100.0", "commission": "1.5",
+             "commissionAsset": "USDT", "marginAsset": "USDT"},
+        ])
+
+        assert account.get_trade_realized_pnl("BTCUSDT", 1000) == pytest.approx(98.5)
+
+    def test_fees_accumulate_across_fills(self, monkeypatch):
+        self._trades(monkeypatch, [
+            {"time": 2000, "realizedPnl": "60.0", "commission": "1.0",
+             "commissionAsset": "USDT", "marginAsset": "USDT"},
+            {"time": 2100, "realizedPnl": "40.0", "commission": "1.2",
+             "commissionAsset": "USDT", "marginAsset": "USDT"},
+        ])
+
+        assert account.get_trade_realized_pnl("BTCUSDT", 1000) == pytest.approx(97.8)
+
+    def test_small_gross_win_can_become_net_loss(self, monkeypatch):
+        # Энэ л шалтгаанаар win rate хиймлээр өсдөг байсан
+        self._trades(monkeypatch, [
+            {"time": 2000, "realizedPnl": "1.0", "commission": "2.3",
+             "commissionAsset": "USDT", "marginAsset": "USDT"},
+        ])
+
+        assert account.get_trade_realized_pnl("BTCUSDT", 1000) < 0
+
+    def test_foreign_fee_asset_is_not_subtracted(self, monkeypatch):
+        # BNB-ээр төлсөн шимтгэлийг USDT ашгаас шууд хасах нь нэгж зөрчинө
+        self._trades(monkeypatch, [
+            {"time": 2000, "realizedPnl": "50.0", "commission": "0.01",
+             "commissionAsset": "BNB", "marginAsset": "USDT"},
+        ])
+
+        assert account.get_trade_realized_pnl("BTCUSDT", 1000) == pytest.approx(50.0)
+
+    def test_missing_commission_field_is_safe(self, monkeypatch):
+        self._trades(monkeypatch, [{"time": 2000, "realizedPnl": "25.0"}])
+
+        assert account.get_trade_realized_pnl("BTCUSDT", 1000) == pytest.approx(25.0)
+
+    def test_trades_before_open_time_are_ignored(self, monkeypatch):
+        self._trades(monkeypatch, [
+            {"time": 100, "realizedPnl": "999.0", "commission": "1.0",
+             "commissionAsset": "USDT", "marginAsset": "USDT"},
+            {"time": 20000, "realizedPnl": "10.0", "commission": "0.5",
+             "commissionAsset": "USDT", "marginAsset": "USDT"},
+        ])
+
+        assert account.get_trade_realized_pnl("BTCUSDT", 10000) == pytest.approx(9.5)
+
+    def test_api_error_returns_zero(self, monkeypatch):
+        self._trades(monkeypatch, {"code": -9999, "msg": "timeout"})
+
+        assert account.get_trade_realized_pnl("BTCUSDT", 1000) == 0.0
+
+
 class TestDivisionGuards:
     def test_zero_leverage_falls_back_to_configured(self, monkeypatch):
         # leverage=0 нь margin тооцоололд 0-д хуваах алдаа өгч циклийг унагаана
