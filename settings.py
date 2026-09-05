@@ -88,6 +88,7 @@ MTF_ENABLED = _cfg.get("mtf_enabled", True)
 VWAP_ENABLED = _cfg.get("vwap_enabled", True)
 FUNDING_ENABLED = _cfg.get("funding_enabled", True)
 BREAKOUT_VOLUME_RATIO = _cfg.get("breakout_volume_ratio", 1.5)
+MACD_MIN_VOLUME_RATIO = _cfg.get("macd_min_volume_ratio", 1.0)
 
 # ---- ШИНЭ: News Trading ----
 NEWS_TRADING = _cfg.get("news_trading", {})

@@ -350,6 +350,37 @@ class TestGenerateStrategySignal:
         signal = strategies.generate_strategy_signal(strategy, df, sentiment=0.0, regime="TRENDING")
         assert signal in ("BUY", "SELL", "HOLD")
 
+    def _macd_burst_df(self, direction="up", volumes=None):
+        """Доошлоод (эсвэл өсөөд) сүүлийн хэдэн мөрд эсрэг чиглэлд огцом
+        хурдассан momentum burst — MACD histogram шинээр өсч/буурч эхэлдэг,
+        RSI хэт extreme болоогүй тохиолдол."""
+        if direction == "up":
+            lead = [150.0 - i * 0.8 for i in range(40)]
+            burst = [lead[-1] + i * 1.2 for i in range(1, 8)]
+        else:
+            lead = [100.0 + i * 0.8 for i in range(40)]
+            burst = [lead[-1] - i * 1.2 for i in range(1, 8)]
+        return make_df(lead + burst, volumes=volumes)
+
+    def test_macd_momentum_buys_on_normal_volume(self):
+        df = self._macd_burst_df("up")
+        assert strategies.generate_strategy_signal("MACD_MOMENTUM", df, sentiment=0.0, regime="TRENDING") == "BUY"
+
+    def test_macd_momentum_holds_on_thin_volume(self):
+        # histogram-ийн нөхцөл ижил хэвээр, зөвхөн сүүлийн мөрийн эзлэхүүн
+        # дундажаас доогуур бол — үүнгүйгээр momentum burst chart-ийн шуугиан
+        # (thin volume) дээр ч BUY гардаг байсан
+        df = self._macd_burst_df("up", volumes=[100.0] * 46 + [20.0])
+        assert strategies.generate_strategy_signal("MACD_MOMENTUM", df, sentiment=0.0, regime="TRENDING") == "HOLD"
+
+    def test_macd_momentum_sells_on_normal_volume(self):
+        df = self._macd_burst_df("down")
+        assert strategies.generate_strategy_signal("MACD_MOMENTUM", df, sentiment=0.0, regime="TRENDING") == "SELL"
+
+    def test_macd_momentum_holds_sell_on_thin_volume(self):
+        df = self._macd_burst_df("down", volumes=[100.0] * 46 + [20.0])
+        assert strategies.generate_strategy_signal("MACD_MOMENTUM", df, sentiment=0.0, regime="TRENDING") == "HOLD"
+
     def test_rsi_strategy_buys_when_oversold(self):
         df = downtrend_df(n=260, start=500.0, step=1.0)
         signal = strategies.generate_strategy_signal("RSI_STRATEGY", df, sentiment=0.0, regime="RANGE")

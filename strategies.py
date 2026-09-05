@@ -94,8 +94,17 @@ def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
         return "HOLD"
 
     elif strategy == "MACD_MOMENTUM":
-        if histogram.iloc[-1] > 0 and histogram.iloc[-1] > histogram.iloc[-2] and rsi < 70: return "BUY"
-        if histogram.iloc[-1] < 0 and histogram.iloc[-1] < histogram.iloc[-2] and rsi > 30: return "SELL"
+        # volume_ratio нь calculate_strategy_score-д ордог ч энд шалгагддаггүй
+        # байсан тул histogram огцом хөдлөх мөртлөө эзлэхүүнгүй (noise) мөч ч
+        # BUY/SELL болж, зөвхөн оноогоор доогуур байрлаж чаддаг байв —
+        # оноо хангалттай өндөр байвал хуурамч signal ч дамжина.
+        volume_ratio = indicators.calculate_volume_ratio(df)
+        if (histogram.iloc[-1] > 0 and histogram.iloc[-1] > histogram.iloc[-2]
+                and rsi < 70 and volume_ratio >= MACD_MIN_VOLUME_RATIO):
+            return "BUY"
+        if (histogram.iloc[-1] < 0 and histogram.iloc[-1] < histogram.iloc[-2]
+                and rsi > 30 and volume_ratio >= MACD_MIN_VOLUME_RATIO):
+            return "SELL"
 
     elif strategy == "BREAKOUT":
         # Bollinger band-аас volume spike-тайгаар цуцарвал continuation гэж

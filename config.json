@@ -57,6 +57,7 @@
   "vwap_enabled": true,
   "funding_enabled": true,
   "breakout_volume_ratio": 1.5,
+  "macd_min_volume_ratio": 1.0,
 
   "news_trading": {
     "enabled": false,
