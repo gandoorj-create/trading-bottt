@@ -756,19 +756,21 @@ def get_order_book(symbol, limit=20):
         print(f"⚠️ Order book error {symbol}: {e}")
         return [], []
 
-def find_strong_levels(symbol, price):
-    if not ORDER_BOOK_ENABLED:
+def find_strong_levels(df, lookback=100):
+    """Сүүлийн `lookback` лааны swing доод/дээд түвшин.
+
+    Өмнө нь энэ нь order book-ийн хамгийн том 20 захиалгаас авдаг байсан тул
+    зөвхөн spread-ийн эргэн тойрны утга гардаг байв (жишээ нь ETH дээр
+    2453.47 / 2454.18 буюу 0.03% зөрүү) — дэмжлэг/эсэргүүцэл гэж нэрлэх
+    боломжгүй. Одоо үнийн түүхээс тооцно, нэмэлт API дуудлага ч шаардахгүй.
+    """
+    if df is None or len(df) < 2:
         return None, None
-    bids, asks = get_order_book(symbol, ORDER_BOOK_LIMIT)
-    if not bids or not asks:
+    window = df.iloc[-lookback:]
+    support = float(window["low"].min())
+    resistance = float(window["high"].max())
+    if support <= 0 or resistance <= 0:
         return None, None
-    
-    strong_bid = max(bids, key=lambda x: x[1]) if bids else None
-    strong_ask = max(asks, key=lambda x: x[1]) if asks else None
-    
-    support = strong_bid[0] if strong_bid else None
-    resistance = strong_ask[0] if strong_ask else None
-    
     return support, resistance
 
 
@@ -1080,9 +1082,10 @@ def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
 def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slope, sentiment, regime, chop, mtf_signal):
     score = 0.0
     
-    mtf_penalty = 0
-    if mtf_signal == "NEUTRAL":
-        mtf_penalty = -5
+    # MTF унтраалттай үед get_mtf_signal нь үргэлж "NEUTRAL" буцаадаг тул энэ
+    # торгууль бүх стратегид ялгаагүй тусч, оноог утгагүйгээр дардаг байв.
+    # Торгууль нь зөвхөн MTF асаалттай, чиглэл нь үнэхээр тодорхойгүй үед л утгатай.
+    mtf_penalty = -5 if (MTF_ENABLED and mtf_signal == "NEUTRAL") else 0
     
     chop_score = 0
     if regime in ["STRONG_TREND", "TRENDING"]:
@@ -1183,10 +1186,12 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         if len(df) < 210:
             return None
 
+        # MTF нь өмнө нь NEUTRAL coin-ыг бүрмөсөн хаядаг байсан. 4h ба 1h чиглэл
+        # зөрөх нь trend эргэх үед байнга тохиолддог тул зах зээлийн ихэнх хэсэг
+        # аль ч стратегид хүрэлгүй унадаг байв. Одоо хасахын оронд чиглэлийг нь
+        # доор шалгаж, NEUTRAL үед calculate_strategy_score дахь -5 торгуулиар
+        # барина (тэр торгууль өмнө нь хүрэшгүй dead code байсан).
         mtf_signal = get_mtf_signal(symbol)
-        if MTF_ENABLED and mtf_signal == "NEUTRAL":
-            print(f"⏸️ SKIPPED {symbol}: MTF Neutral")
-            return None
 
         if CORRELATION_ENABLED and check_correlation and active_symbols:
             for sym in active_symbols:
@@ -1212,9 +1217,9 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         vwap = calculate_vwap(df).iloc[-1]
         funding_rate = get_funding_rate(symbol)
         
-        support, resistance = find_strong_levels(symbol, close)
+        support, resistance = find_strong_levels(df)
         if support and resistance:
-            print(f"🔹 {symbol} Support: {support:.2f} | Resistance: {resistance:.2f}")
+            print(f"🔹 {symbol} Support: {support:.6g} | Resistance: {resistance:.6g}")
         
         sentiment = 0.0
         if funding_rate > FUNDING_SENTIMENT_THRESHOLD:
@@ -1238,6 +1243,16 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
                 signal = "HOLD"
             if signal == "SELL" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] > ema50.iloc[-1]:
                 signal = "HOLD"
+
+            # Өндөр давтамжийн trend-ийн эсрэг арилжаа хийхгүй. Өмнө нь MTF нь
+            # тодорхойгүй coin-ыг хаядаг байсан ч эсрэг чиглэлийн арилжааг
+            # саадгүй нэвтрүүлдэг байсан — санаанаасаа эсрэг ажиллаж байв.
+            if MTF_ENABLED:
+                if mtf_signal == "BULLISH" and signal == "SELL":
+                    signal = "HOLD"
+                elif mtf_signal == "BEARISH" and signal == "BUY":
+                    signal = "HOLD"
+
             if score < MIN_SIGNAL_SCORE:
                 signal = "HOLD"
                 

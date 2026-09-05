@@ -1835,3 +1835,127 @@ class TestProtectionDetectionOnRecovery:
         rebuilt = self._recover(monkeypatch, lambda m, e: _invalid_path())
 
         assert rebuilt == ["BTCUSDT"]
+
+
+# ----------------------------------------------------------------
+# MTF шүүлтүүр
+#
+# Өмнө нь 4h/1h чиглэл зөрсөн (NEUTRAL) coin бүрмөсөн хаягддаг байсан бөгөөд
+# үүний зэрэгцээ MTF-ийн эсрэг чиглэлийн арилжааг саадгүй нэвтрүүлдэг байв.
+# ----------------------------------------------------------------
+
+@pytest.fixture
+def analyze_env(monkeypatch):
+    """analyze_coin-ийн сүлжээний хамаарлыг мок болгоно."""
+    df = noisy_uptrend_df(n=260)
+    monkeypatch.setattr(bot, "get_klines", lambda symbol, interval="1h", limit=200, **kw: df.copy())
+    monkeypatch.setattr(bot, "get_funding_rate", lambda symbol: 0.0)
+    monkeypatch.setattr(bot, "CORRELATION_ENABLED", False)
+    monkeypatch.setattr(bot, "MIN_SIGNAL_SCORE", 0.0)
+    monkeypatch.setattr(bot, "MTF_ENABLED", True)
+    return df
+
+
+class TestMtfFilter:
+    def test_neutral_coin_is_still_analysed(self, monkeypatch, analyze_env):
+        # Өмнө нь энэ None буцаадаг байсан — coin бүрмөсөн хаягддаг байв
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "NEUTRAL")
+
+        result = bot.analyze_coin("BTCUSDT", check_correlation=False)
+
+        assert result is not None
+        assert result["mtf"] == "NEUTRAL"
+
+    def test_bullish_mtf_blocks_sell_signals(self, monkeypatch, analyze_env):
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "BULLISH")
+        monkeypatch.setattr(bot, "generate_strategy_signal",
+                            lambda strategy, df, sentiment, regime, chop=None: "SELL")
+
+        result = bot.analyze_coin("BTCUSDT", check_correlation=False)
+
+        assert all(r["signal"] == "HOLD" for r in result["strategies"].values())
+
+    def test_bullish_mtf_allows_buy_signals(self, monkeypatch, analyze_env):
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "BULLISH")
+        monkeypatch.setattr(bot, "generate_strategy_signal",
+                            lambda strategy, df, sentiment, regime, chop=None: "BUY")
+
+        result = bot.analyze_coin("BTCUSDT", check_correlation=False)
+
+        assert any(r["signal"] == "BUY" for r in result["strategies"].values())
+
+    def test_bearish_mtf_blocks_buy_signals(self, monkeypatch, analyze_env):
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "BEARISH")
+        monkeypatch.setattr(bot, "generate_strategy_signal",
+                            lambda strategy, df, sentiment, regime, chop=None: "BUY")
+
+        result = bot.analyze_coin("BTCUSDT", check_correlation=False)
+
+        assert all(r["signal"] == "HOLD" for r in result["strategies"].values())
+
+    def test_neutral_mtf_allows_both_directions(self, monkeypatch, analyze_env):
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "NEUTRAL")
+        monkeypatch.setattr(bot, "generate_strategy_signal",
+                            lambda strategy, df, sentiment, regime, chop=None: "SELL")
+
+        result = bot.analyze_coin("BTCUSDT", check_correlation=False)
+
+        assert any(r["signal"] == "SELL" for r in result["strategies"].values())
+
+    def test_disabled_mtf_does_not_filter(self, monkeypatch, analyze_env):
+        monkeypatch.setattr(bot, "MTF_ENABLED", False)
+        monkeypatch.setattr(bot, "get_mtf_signal", lambda symbol: "NEUTRAL")
+        monkeypatch.setattr(bot, "generate_strategy_signal",
+                            lambda strategy, df, sentiment, regime, chop=None: "SELL")
+
+        result = bot.analyze_coin("BTCUSDT", check_correlation=False)
+
+        assert any(r["signal"] == "SELL" for r in result["strategies"].values())
+
+
+class TestMtfScorePenalty:
+    def _score(self, mtf_signal):
+        return bot.calculate_strategy_score(
+            "SUPERTREND", adx=35, rsi=55, atr_pct=1.0, volume_ratio=2.0,
+            ema_slope=1.0, sentiment=0.0, regime="TRENDING", chop=30,
+            mtf_signal=mtf_signal,
+        )
+
+    def test_neutral_is_penalised_when_mtf_enabled(self, monkeypatch):
+        monkeypatch.setattr(bot, "MTF_ENABLED", True)
+
+        assert self._score("NEUTRAL") == pytest.approx(self._score("BULLISH") - 5)
+
+    def test_no_penalty_when_mtf_disabled(self, monkeypatch):
+        # MTF унтраалттай бол get_mtf_signal үргэлж NEUTRAL буцаадаг тул
+        # торгууль бүх стратегид ялгаагүй тусах ёсгүй
+        monkeypatch.setattr(bot, "MTF_ENABLED", False)
+
+        assert self._score("NEUTRAL") == pytest.approx(self._score("BULLISH"))
+
+
+class TestFindStrongLevels:
+    def test_levels_come_from_price_history(self):
+        df = make_df([100.0, 110.0, 90.0, 105.0])
+
+        support, resistance = bot.find_strong_levels(df)
+
+        # high = close * 1.01, low = close * 0.99
+        assert support == pytest.approx(90.0 * 0.99)
+        assert resistance == pytest.approx(110.0 * 1.01)
+
+    def test_support_below_resistance_on_real_series(self):
+        support, resistance = bot.find_strong_levels(noisy_uptrend_df(n=260))
+
+        assert support < resistance
+
+    def test_lookback_window_is_respected(self):
+        # Эхний лааны хэт өндөр утга lookback-аас гадуур үлдэх ёстой
+        df = make_df([1000.0] + [100.0] * 120)
+
+        _, resistance = bot.find_strong_levels(df, lookback=100)
+
+        assert resistance == pytest.approx(100.0 * 1.01)
+
+    def test_empty_frame_returns_none(self):
+        assert bot.find_strong_levels(make_df([])) == (None, None)
