@@ -148,14 +148,55 @@ Volume холбогдсон үед log нь `/data/bot.log` руу ч бичиг
 
 ## Файлын бүтэц
 
-| Файл | Юу байдаг |
-|---|---|
-| `bot.py` | Индикатор, стратеги, screening, захиалга, мониторинг, `main()` давталт |
-| `state.py` | Ботын runtime state (`BotState` объект) — нэг эх сурвалж |
-| `settings.py` | `.env` + `config.json`-оос тохиргоо ачаалах |
-| `logging_setup.py` | Log тохиргоо (консол + persistent volume дээрх файл) |
-| `telegram_format.py` | Telegram мессежийн формат |
-| `test_bot.py`, `conftest.py` | Тестүүд |
+Модулиуд доороос дээш нэг чиглэлд хамаарна — доод давхаргынх нь дээдийгээ
+хэзээ ч импортлохгүй, тиймээс circular import үүсэхгүй.
+
+| Файл | Мөр | Юу байдаг |
+|---|---:|---|
+| `bot.py` | 278 | Оруулах цэг: тохиргоо шалгах, эхлүүлэх, үндсэн давталт |
+| **Гүйцэтгэл** | | |
+| `execution.py` | 207 | Сонгогдсон signal-уудыг захиалга болгох |
+| `position_manager.py` | 485 | Позицын амьдралын мөчлөг: хамгаалалт, хяналт, хаалт, сэргээлт |
+| `screening.py` | 293 | Coin шинжлэх, корреляци, циклийн сонголт |
+| **Шийдвэр** | | |
+| `strategies.py` | 168 | Зах зээлийн горим, стратеги бүрийн signal ба оноо |
+| `indicators.py` | 135 | Техникийн индикаторууд (гадаад хамааралгүй, цэвэр функцууд) |
+| `risk.py` | 118 | Drawdown breaker, стратегийн түр зогсоолт, realized PnL бүртгэл |
+| **Биржийн давхарга** | | |
+| `order_api.py` | 210 | Захиалга байрлуулах/цуцлах (conditional захиалга Algo service дээр) |
+| `account.py` | 121 | Данс, позиц, leverage, realized PnL |
+| `market_data.py` | 184 | Klines, exchange info, тоймлолт, min notional |
+| `binance_client.py` | 117 | REST давхарга: гарын үсэг, хүсэлт, rate limit, серверийн цаг |
+| **Дэд бүтэц** | | |
+| `state.py` | 90 | Runtime state (`BotState` объект) — нэг эх сурвалж |
+| `settings.py` | 134 | `.env` + `config.json`-оос тохиргоо ачаалах |
+| `persistence.py` | 127 | State файлуудыг унших/бичих |
+| `logging_setup.py` | 68 | Log тохиргоо (консол + volume дээрх файл) |
+| `notifications.py` | 55 | Telegram илгээлт |
+| `reports.py` | 145 | Telegram тайлангууд ба график |
+| `telegram_format.py` | — | Telegram мессежийн формат |
+| `utils.py` | 39 | Жижиг туслахууд (safe_float, clamp, round_down…) |
+| **Нэмэлт** | | |
+| `news.py` | 150 | Мэдээний цагийн хуваарь ба дараах арилжаа |
+| `backtest.py` | 138 | Түүхэн өгөгдөл дээр стратеги турших |
+| `test_bot.py`, `conftest.py` | — | Тестүүд |
+
+### Модуль хооронд хэрхэн дууддаг вэ
+
+Модулиуд бие биенээсээ **нэр биш, модуль** импортолдог:
+
+```python
+import account
+positions = account.get_positions()      # ✅
+```
+
+`from account import get_positions` гэж бичихгүй. Учир нь тэгвэл нэр хуулбарлагдаж,
+дараа нь `account.get_positions`-ыг солиход (тест эсвэл засварын үед) хуучин
+хуулбар нь хэвээр үлдэнэ. Энэ бол `state.py` үүссэн шалтгаантай яг ижил занга.
+
+Мөн `config.json`-ы тогтмолууд `from settings import *`-аар модуль бүрд
+хуулбарлагддаг тул тестэд нэгийг нь солихдоо `conftest.patch_setting()` ашиглаж
+**бүх модульд нэгэн зэрэг** солино.
 
 ### State яагаад тусдаа файлд байдаг вэ
 
@@ -167,7 +208,7 @@ Volume холбогдсон үед log нь `/data/bot.log` руу ч бичиг
 
 ## Мэдэгдэж буй хязгаарлалт
 
-- `bot.py` 2900 мөр — цаашид модуль болгон хуваах шаардлагатай
+- `position_manager.py` 485 мөр — цаашид хаалт/хяналтын хэсгийг салгаж болно
 - Сүлжээний timeout дээр retry байхгүй (rate limit дээр байгаа)
 - `rebuild_protection_orders` тестийн хамралт бага
 - Algo (conditional) захиалга жагсаах endpoint нь баримтжуулалтгүй тул

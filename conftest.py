@@ -6,7 +6,44 @@
 """
 import pytest
 
-import bot
+
+import account
+import backtest
+import binance_client
+import execution
+import indicators
+import market_data
+import news
+import notifications
+import order_api
+import persistence
+import position_manager
+import reports
+import risk
+import screening
+import strategies
+import utils
+from state import state as bot_state
+
+
+# Тохиргооны тогтмолууд `from settings import *`-аар модуль бүрд хуулбарлагддаг тул
+# нэгийг нь солиход бусад нь хуучин утгаараа үлддэг. Тиймээс тухайн нэрийг агуулсан
+# бүх модульд нэгэн зэрэг солино.
+_SETTING_MODULES = (
+    account, backtest, binance_client, execution, indicators, market_data, news,
+    notifications, order_api, persistence, position_manager, reports, risk,
+    screening, strategies, utils,
+)
+
+
+def patch_setting(monkeypatch, name, value):
+    """Тохиргооны тогтмолыг ашиглаж буй бүх модульд солино."""
+    touched = 0
+    for module in _SETTING_MODULES:
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value)
+            touched += 1
+    assert touched, f"{name} аль ч модульд олдсонгүй"
 
 
 class _BlockedNetwork:
@@ -27,15 +64,17 @@ class _BlockedNetwork:
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
-    monkeypatch.setattr(bot, "requests", _BlockedNetwork)
+    # requests-ийг импортолсон модуль бүрд блоклоно
+    for module in (binance_client, notifications, news):
+        monkeypatch.setattr(module, "requests", _BlockedNetwork)
 
 
 @pytest.fixture(autouse=True)
 def no_telegram(monkeypatch):
     """Telegram илгээлтийг барьж аваад дуудлагыг нь жагсаана."""
     sent = []
-    monkeypatch.setattr(bot, "send_telegram", lambda text, pin=False: sent.append(text))
-    monkeypatch.setattr(bot, "send_telegram_photo", lambda photo_bytes, caption="": sent.append(caption))
+    monkeypatch.setattr(notifications, "send_telegram", lambda text, pin=False: sent.append(text))
+    monkeypatch.setattr(notifications, "send_telegram_photo", lambda photo_bytes, caption="": sent.append(caption))
     return sent
 
 
@@ -48,17 +87,17 @@ def telegram_messages(no_telegram):
 @pytest.fixture(autouse=True)
 def isolated_state_files(monkeypatch, tmp_path):
     """State файлууд tmp директорт бичигдэнэ — репо доторх файл хөндөгдөхгүй."""
-    monkeypatch.setattr(bot, "STRATEGY_STATE_FILE", str(tmp_path / "strategy_state.json"))
-    monkeypatch.setattr(bot, "SESSION_STATE_FILE", str(tmp_path / "session_state.json"))
+    monkeypatch.setattr(persistence, "STRATEGY_STATE_FILE", str(tmp_path / "strategy_state.json"))
+    monkeypatch.setattr(persistence, "SESSION_STATE_FILE", str(tmp_path / "session_state.json"))
     return tmp_path
 
 
 @pytest.fixture(autouse=True)
 def clean_state():
     """Runtime state-ийг тест бүрийн өмнө болон дараа цэвэр байдалд буцаана."""
-    bot.state.reset()
-    yield bot.state
-    bot.state.reset()
+    bot_state.reset()
+    yield bot_state
+    bot_state.reset()
 
 
 @pytest.fixture
@@ -82,6 +121,6 @@ def fake_symbol_info(monkeypatch):
             "pricePrecision": 5,
         },
     }
-    bot.state.symbol_info_cache = info
-    monkeypatch.setattr(bot, "load_exchange_info", lambda: None)
+    bot_state.symbol_info_cache = info
+    monkeypatch.setattr(market_data, "load_exchange_info", lambda: None)
     return info
