@@ -37,6 +37,7 @@ SELECTION_INTERVAL_MINUTES = _cfg["selection_interval_minutes"]
 MONITOR_INTERVAL_SEC = _cfg["monitor_interval_sec"]
 TELEGRAM_REPORT_INTERVAL_SEC = _cfg["telegram_report_interval_sec"]
 MAX_SELECTIONS = _cfg["max_selections"]
+MAX_CANDIDATES_PER_STRATEGY = _cfg.get("max_candidates_per_strategy", 1)
 
 TRADE_ALLOCATION = _cfg["trade_allocation"]
 LEVERAGE = _cfg["leverage"]

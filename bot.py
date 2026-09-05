@@ -1315,9 +1315,12 @@ def screen_coins():
         if not candidates:
             continue
         candidates.sort(key=lambda x: x["score"], reverse=True)
-        best = candidates[0]
-        strategy_candidates.append(best)
-        print(f"🎯 {strategy:<30} → {best['symbol']:<10} {best['signal']:<4} Score={best['score']:.2f}")
+        # Стратеги бүрээс зөвхөн 1 coin авдаг байсан тул нэр дэвшигчийн тоо
+        # стратегийн тоогоор (6) таглагдаж, давхардал болон корреляци хассаны
+        # дараа ихэвчлэн 2 л үлддэг байв.
+        for best in candidates[:MAX_CANDIDATES_PER_STRATEGY]:
+            strategy_candidates.append(best)
+            print(f"🎯 {strategy:<30} → {best['symbol']:<10} {best['signal']:<4} Score={best['score']:.2f}")
 
     by_symbol = defaultdict(list)
     for candidate in strategy_candidates:

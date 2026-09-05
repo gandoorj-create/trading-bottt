@@ -1227,6 +1227,44 @@ class TestScreenCoins:
         assert len(selected) == 1
         assert selected[0]["strategy"] == "SUPERTREND"
 
+    def test_takes_multiple_candidates_per_strategy(self, monkeypatch, screen_env):
+        # Нэг стратеги хэд хэдэн coin дээр signal өгвөл бүгдийг нь авна —
+        # өмнө нь зөвхөн хамгийн өндөр онооных нь л ордог байсан
+        monkeypatch.setattr(bot, "MAX_CANDIDATES_PER_STRATEGY", 3)
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)}),
+            _analysis("ETHUSDT", {"RSI_STRATEGY": ("BUY", 80.0)}),
+            _analysis("SOLUSDT", {"RSI_STRATEGY": ("BUY", 70.0)}),
+        ])
+
+        selected = bot.screen_coins()
+
+        assert sorted(c["symbol"] for c in selected) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+    def test_candidate_cap_per_strategy_is_respected(self, monkeypatch, screen_env):
+        monkeypatch.setattr(bot, "MAX_CANDIDATES_PER_STRATEGY", 2)
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)}),
+            _analysis("ETHUSDT", {"RSI_STRATEGY": ("BUY", 80.0)}),
+            _analysis("SOLUSDT", {"RSI_STRATEGY": ("BUY", 70.0)}),
+        ])
+
+        selected = bot.screen_coins()
+
+        # Хамгийн өндөр оноотой 2 нь үлдэнэ
+        assert sorted(c["symbol"] for c in selected) == ["BTCUSDT", "ETHUSDT"]
+
+    def test_cap_of_one_keeps_old_behaviour(self, monkeypatch, screen_env):
+        monkeypatch.setattr(bot, "MAX_CANDIDATES_PER_STRATEGY", 1)
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)}),
+            _analysis("ETHUSDT", {"RSI_STRATEGY": ("BUY", 80.0)}),
+        ])
+
+        selected = bot.screen_coins()
+
+        assert [c["symbol"] for c in selected] == ["BTCUSDT"]
+
     def test_respects_max_selections(self, monkeypatch, screen_env):
         monkeypatch.setattr(bot, "MAX_SELECTIONS", 2)
         _use_analyses(monkeypatch, [
