@@ -4,7 +4,7 @@
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "POLUSDT", "LINKUSDT",
     "DOTUSDT", "UNIUSDT", "LTCUSDT", "NEARUSDT", "ATOMUSDT"
   ],
-  "selection_interval_minutes": 360,
+  "selection_interval_minutes": 120,
   "monitor_interval_sec": 30,
   "telegram_report_interval_sec": 300,
   "max_selections": 6,
@@ -34,7 +34,7 @@
   "adaptive_strategy": true,
   "strategy_performance_tracking": true,
   "consecutive_loss_limit": 3,
-  "strategy_cooldown_cycles": 2,
+  "strategy_cooldown_cycles": 6,
 
   "dca_enabled": false,
   "dca_levels": 2,
