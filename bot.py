@@ -1352,22 +1352,33 @@ def screen_coins():
         if len(candidates) > 1:
             print(f"🔄 DUPLICATE {symbol}: WINNER {winner['strategy']}")
 
+    # Оноогоор эрэмбэлнэ. Өмнө нь нэр дэвшигчид стратегийн дарааллаар байсан тул
+    # эхний стратегийн сул signal (оноо 14) сүүлийн стратегийн хүчтэйг (оноо 27)
+    # байрнаас нь шахаж гаргадаг байв.
+    unique_candidates.sort(key=lambda x: x["score"], reverse=True)
+
     if CORRELATION_ENABLED:
         final_selected = []
         removed_by_correlation = []
-        for i, coin in enumerate(unique_candidates):
-            ok = True
-            for j in range(i):
-                if abs(calculate_correlation_cached(coin["symbol"], unique_candidates[j]["symbol"], CORRELATION_LOOKBACK)) > CORRELATION_THRESHOLD:
-                    ok = False
-                    removed_by_correlation.append(coin["symbol"])
-                    print(f"🔴 REMOVED {coin['symbol']}: high correlation with {unique_candidates[j]['symbol']}")
+        for coin in unique_candidates:
+            # ЗӨВХӨН сонгогдсонтой харьцуулна. Өмнө нь бүх өмнөх нэр дэвшигчтэй
+            # харьцуулдаг байсан тул хасагдсан coin өөрөө бусдыг хасах чадвартай
+            # хэвээр үлдэж, гинжин урвал үүсгэдэг байв: A-B хамааралтай, B-C
+            # хамааралтай атлаа A-C хамааралгүй байхад C ч хасагддаг.
+            clash = None
+            for kept in final_selected:
+                corr = calculate_correlation_cached(coin["symbol"], kept["symbol"], CORRELATION_LOOKBACK)
+                if abs(corr) > CORRELATION_THRESHOLD:
+                    clash = kept["symbol"]
                     break
-            if ok:
-                final_selected.append(coin)
+            if clash:
+                removed_by_correlation.append(coin["symbol"])
+                print(f"🔴 REMOVED {coin['symbol']}: high correlation with {clash}")
+                continue
+            final_selected.append(coin)
             if len(final_selected) >= MAX_SELECTIONS:
                 break
-        selected = final_selected[:MAX_SELECTIONS]
+        selected = final_selected
         if removed_by_correlation:
             skipped_reasons.append(f"🔗 Корреляциас хасагдсан: {', '.join(removed_by_correlation)}")
     else:

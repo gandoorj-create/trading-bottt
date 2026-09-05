@@ -44,7 +44,7 @@
   "correlation_enabled": true,
   "correlation_threshold": 0.85,
   "correlation_lookback": 50,
-  "correlation_cache_ttl": 3600,
+  "correlation_cache_ttl": 14400,
 
   "order_book_enabled": true,
   "order_book_limit": 20,

@@ -1289,6 +1289,57 @@ class TestScreenCoins:
 
         assert len(selected) == 1
 
+    def test_rejected_candidate_does_not_reject_others(self, monkeypatch, screen_env):
+        """A-B хамааралтай, B-C хамааралтай, A-C хамааралгүй.
+
+        B хасагдсан тул C-г хасах эрхгүй — өмнө нь хасагдсан нэр дэвшигч
+        бусдыг хасаад байсан тул сонголт хэт нимгэрдэг байв.
+        """
+        pairs = {
+            frozenset(["BTCUSDT", "ETHUSDT"]): 0.95,
+            frozenset(["ETHUSDT", "SOLUSDT"]): 0.95,
+            frozenset(["BTCUSDT", "SOLUSDT"]): 0.10,
+        }
+        monkeypatch.setattr(bot, "CORRELATION_ENABLED", True)
+        monkeypatch.setattr(bot, "CORRELATION_THRESHOLD", 0.85)
+        monkeypatch.setattr(bot, "calculate_correlation_cached",
+                            lambda s1, s2, lookback=50: pairs[frozenset([s1, s2])])
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"RSI_STRATEGY": ("BUY", 90.0)}),
+            _analysis("ETHUSDT", {"SUPERTREND": ("BUY", 80.0)}),
+            _analysis("SOLUSDT", {"MACD_MOMENTUM": ("BUY", 70.0)}),
+        ])
+
+        selected = [c["symbol"] for c in bot.screen_coins()]
+
+        assert selected == ["BTCUSDT", "SOLUSDT"]
+
+    def test_highest_scoring_candidate_wins_the_slot(self, monkeypatch, screen_env):
+        # SUPERTREND нь стратегийн жагсаалтад эхэнд, гэхдээ оноо нь бага —
+        # хамааралтай хос дотроос өндөр оноотой нь үлдэх ёстой
+        monkeypatch.setattr(bot, "CORRELATION_ENABLED", True)
+        monkeypatch.setattr(bot, "CORRELATION_THRESHOLD", 0.85)
+        monkeypatch.setattr(bot, "calculate_correlation_cached", lambda s1, s2, lookback=50: 0.95)
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"SUPERTREND": ("BUY", 15.0)}),
+            _analysis("ETHUSDT", {"TREND_FOLLOWING": ("BUY", 27.0)}),
+        ])
+
+        selected = bot.screen_coins()
+
+        assert [c["symbol"] for c in selected] == ["ETHUSDT"]
+
+    def test_selection_is_ordered_by_score(self, monkeypatch, screen_env):
+        _use_analyses(monkeypatch, [
+            _analysis("BTCUSDT", {"SUPERTREND": ("BUY", 20.0)}),
+            _analysis("ETHUSDT", {"TREND_FOLLOWING": ("BUY", 90.0)}),
+            _analysis("SOLUSDT", {"MACD_MOMENTUM": ("BUY", 50.0)}),
+        ])
+
+        scores = [c["score"] for c in bot.screen_coins()]
+
+        assert scores == sorted(scores, reverse=True)
+
     def test_uncorrelated_symbols_both_kept(self, monkeypatch, screen_env):
         monkeypatch.setattr(bot, "CORRELATION_ENABLED", True)
         monkeypatch.setattr(bot, "CORRELATION_THRESHOLD", 0.65)
