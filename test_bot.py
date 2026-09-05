@@ -2008,6 +2008,48 @@ class TestLowScoreDiagnostic:
         assert any("Оноо хэт бага" in r for r in reported["reasons"])
 
 
+class TestLoggingSetup:
+    def test_console_only_when_not_persistent(self, tmp_path):
+        import logging_setup
+
+        path = logging_setup.setup_logging(str(tmp_path), persistent=False)
+
+        assert path is None
+        assert not list(tmp_path.iterdir())
+
+    def test_writes_file_on_persistent_volume(self, tmp_path):
+        import logging_setup
+
+        path = logging_setup.setup_logging(str(tmp_path), persistent=True)
+        logging_setup.get_logger().error("❌ тестийн алдаа")
+
+        assert path is not None
+        assert "тестийн алдаа" in open(path, encoding="utf-8").read()
+
+    def test_level_is_recorded(self, tmp_path):
+        import logging_setup
+
+        path = logging_setup.setup_logging(str(tmp_path), persistent=True)
+        log = logging_setup.get_logger()
+        log.warning("⚠️ анхааруулга")
+        log.info("мэдээлэл")
+
+        content = open(path, encoding="utf-8").read()
+        assert "WARNING" in content
+        assert "INFO" in content
+
+    def test_unwritable_dir_does_not_raise(self):
+        import logging_setup
+
+        # Алдаа шидэхгүй, зөвхөн консол руу үлдэнэ
+        assert logging_setup.setup_logging("/proc/not-writable", persistent=True) is None
+
+    def test_no_state_dir_is_console_only(self):
+        import logging_setup
+
+        assert logging_setup.setup_logging(None, persistent=True) is None
+
+
 class TestDivisionGuards:
     def test_zero_leverage_falls_back_to_configured(self, monkeypatch):
         # leverage=0 нь margin тооцоололд 0-д хуваах алдаа өгч циклийг унагаана

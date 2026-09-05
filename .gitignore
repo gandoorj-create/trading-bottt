@@ -7,3 +7,5 @@ htmlcov/
 # Ботын runtime state — сервер дээр үүсдэг, репод хадгалахгүй
 strategy_state.json
 session_state.json
+bot.log
+bot.log.*

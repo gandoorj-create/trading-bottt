@@ -19,7 +19,7 @@ from urllib.parse import urlencode
 try:
     import pytz
 except ImportError:
-    print("⚠️ pytz not found. Installing...")
+    log.warning("⚠️ pytz not found. Installing...")
     os.system("pip install pytz")
     import pytz
 
@@ -28,7 +28,7 @@ try:
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 except ImportError:
-    print("⚠️ matplotlib not found. Installing...")
+    log.warning("⚠️ matplotlib not found. Installing...")
     os.system("pip install matplotlib")
     import matplotlib
     matplotlib.use('Agg')
@@ -37,6 +37,9 @@ except ImportError:
 from telegram_format import format_block, format_section, money
 from settings import *
 from state import STRATEGY_NAMES, state
+from logging_setup import setup_logging, get_logger
+
+log = get_logger()
 
 # ==========================================================
 # 📦 STATE PERSISTENCE
@@ -73,7 +76,7 @@ def check_state_storage():
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
     except Exception as e:
-        print(f"🚨 STATE DIR бичигдэхгүй байна ({STATE_DIR}): {e}")
+        log.error(f"🚨 STATE DIR бичигдэхгүй байна ({STATE_DIR}): {e}")
         send_telegram(format_block("STATE STORAGE АЛДАА", "🚨", [
             ("Директор", str(STATE_DIR)),
             ("Error", str(e)[:200]),
@@ -82,11 +85,11 @@ def check_state_storage():
         return False
 
     if STATE_DIR_IS_PERSISTENT:
-        print(f"💾 State хадгалалт: {STATE_DIR} (persistent volume)")
+        log.info(f"💾 State хадгалалт: {STATE_DIR} (persistent volume)")
         return True
 
-    print(f"⚠️ State хадгалалт: {STATE_DIR} — түр зуурын диск!")
-    print("   Railway дээр volume mount хийж STATE_DIR-ийг заана уу (жишээ нь /data).")
+    log.warning(f"⚠️ State хадгалалт: {STATE_DIR} — түр зуурын диск!")
+    log.info("   Railway дээр volume mount хийж STATE_DIR-ийг заана уу (жишээ нь /data).")
     send_telegram(format_block("STATE ХАДГАЛАЛТ ТҮР ЗУУРЫН", "⚠️", [
         ("Директор", str(STATE_DIR)),
         ("Эрсдэл", "Redeploy хийхэд drawdown peak тэглэгдэж, стратеги алга болно"),
@@ -112,7 +115,7 @@ def load_strategy_state():
                 if key in saved:
                     current[key] = saved[key]
     except Exception as e:
-        print(f"⚠️ Strategy state load failed: {e}")
+        log.warning(f"⚠️ Strategy state load failed: {e}")
 
 
 def save_strategy_state():
@@ -122,7 +125,7 @@ def save_strategy_state():
         tmp.write_text(json.dumps(state.strategy_stats, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
     except Exception as e:
-        print(f"⚠️ Strategy state save failed: {e}")
+        log.warning(f"⚠️ Strategy state save failed: {e}")
 
 
 def load_session_state():
@@ -133,7 +136,7 @@ def load_session_state():
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
     except Exception as e:
-        print(f"⚠️ Session state load failed: {e}")
+        log.warning(f"⚠️ Session state load failed: {e}")
         return None
 
 
@@ -153,7 +156,7 @@ def save_session_state():
         }, indent=2), encoding="utf-8")
         tmp.replace(path)
     except Exception as e:
-        print(f"⚠️ Session state save failed: {e}")
+        log.warning(f"⚠️ Session state save failed: {e}")
 
 # ==========================================================
 # 💰 SESSION STATE
@@ -235,10 +238,10 @@ def sync_server_time():
         server_time = int(data.get("serverTime", local_after))
         local_mid = (local_before + local_after) // 2
         state.server_time_offset_ms = server_time - local_mid
-        print(f"🕐 Server time offset: {state.server_time_offset_ms} ms")
+        log.info(f"🕐 Server time offset: {state.server_time_offset_ms} ms")
         return True
     except Exception as e:
-        print(f"⚠️ Server time sync failed: {e}")
+        log.warning(f"⚠️ Server time sync failed: {e}")
         return False
 
 def current_timestamp_ms():
@@ -262,7 +265,7 @@ def send_telegram(text, pin=False):
         }
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code != 200:
-            print("❌ Telegram error:", response.text)
+            log.error(f"❌ Telegram error: {response.text}")
             return False
         result = response.json()
         if pin and result.get("ok"):
@@ -271,7 +274,7 @@ def send_telegram(text, pin=False):
             requests.post(pin_url, json={"chat_id": CHAT_ID, "message_id": message_id}, timeout=10)
         return True
     except Exception as e:
-        print(f"❌ Telegram exception: {e}")
+        log.error(f"❌ Telegram exception: {e}")
         return False
 
 def send_telegram_photo(photo_bytes, caption=""):
@@ -285,10 +288,10 @@ def send_telegram_photo(photo_bytes, caption=""):
         if response.status_code == 200:
             return True
         else:
-            print(f"❌ Photo send error: {response.text}")
+            log.error(f"❌ Photo send error: {response.text}")
             return False
     except Exception as e:
-        print(f"❌ Photo exception: {e}")
+        log.error(f"❌ Photo exception: {e}")
         return False
 
 
@@ -325,7 +328,7 @@ def send_signed_request(method, endpoint, params=None, retry_on_time_error=True,
         # Back off on weight bans (429) / IP bans (418) before we dig the hole deeper.
         if response.status_code in (418, 429) and _rl_attempt < 4:
             wait = _rate_limit_wait(response, _rl_attempt)
-            print(f"⏳ Rate limit {response.status_code} {endpoint} — sleeping {wait}s")
+            log.info(f"⏳ Rate limit {response.status_code} {endpoint} — sleeping {wait}s")
             time.sleep(wait)
             return send_signed_request(method, endpoint, params, retry_on_time_error, _rl_attempt + 1)
 
@@ -335,21 +338,21 @@ def send_signed_request(method, endpoint, params=None, retry_on_time_error=True,
             data = {"code": response.status_code, "msg": response.text}
 
         if retry_on_time_error and isinstance(data, dict) and safe_float(data.get("code"), 0) == -1021:
-            print("⚠️ Timestamp error. Resyncing server time...")
+            log.warning("⚠️ Timestamp error. Resyncing server time...")
             sync_server_time()
             return send_signed_request(method, endpoint, params, retry_on_time_error=False, _rl_attempt=_rl_attempt)
 
         if isinstance(data, dict) and safe_float(data.get("code"), 0) == -1003 and _rl_attempt < 4:
             wait = _rate_limit_wait(response, _rl_attempt)
-            print(f"⏳ Too many requests (-1003) {endpoint} — sleeping {wait}s")
+            log.info(f"⏳ Too many requests (-1003) {endpoint} — sleeping {wait}s")
             time.sleep(wait)
             return send_signed_request(method, endpoint, params, retry_on_time_error, _rl_attempt + 1)
 
         if response.status_code >= 400:
-            print(f"❌ HTTP {response.status_code} {endpoint}: {data}")
+            log.error(f"❌ HTTP {response.status_code} {endpoint}: {data}")
         return data
     except Exception as e:
-        print(f"❌ API error {endpoint}: {e}")
+        log.error(f"❌ API error {endpoint}: {e}")
         return {"code": -9999, "msg": str(e)}
 
 
@@ -358,12 +361,12 @@ def send_public_request(endpoint, params=None, _rl_attempt=0):
         response = requests.get(f"{BASE_URL}{endpoint}", params=params, timeout=REQUEST_TIMEOUT)
         if response.status_code in (418, 429) and _rl_attempt < 4:
             wait = _rate_limit_wait(response, _rl_attempt)
-            print(f"⏳ Rate limit {response.status_code} on {endpoint} — sleeping {wait}s")
+            log.info(f"⏳ Rate limit {response.status_code} on {endpoint} — sleeping {wait}s")
             time.sleep(wait)
             return send_public_request(endpoint, params, _rl_attempt + 1)
         return response.json()
     except Exception as e:
-        print(f"❌ Public API error {endpoint}: {e}")
+        log.error(f"❌ Public API error {endpoint}: {e}")
         return {"code": -9999, "msg": str(e)}
 
 
@@ -416,7 +419,7 @@ def decimals_from_step(step):
 def round_quantity(symbol, quantity):
     info = get_symbol_info(symbol)
     if not info:
-        print(f"⚠️ {symbol}: no exchange info found — skipping")
+        log.warning(f"⚠️ {symbol}: no exchange info found — skipping")
         return None
     step = info.get("stepSize")
     if not step or step <= 0:
@@ -427,7 +430,7 @@ def round_quantity(symbol, quantity):
 def round_price(symbol, price):
     info = get_symbol_info(symbol)
     if not info:
-        print(f"⚠️ {symbol}: no exchange info found — skipping")
+        log.warning(f"⚠️ {symbol}: no exchange info found — skipping")
         return None
     tick = info.get("tickSize")
     if not tick or tick <= 0:
@@ -480,7 +483,7 @@ def get_position_mode():
     if is_api_error(data):
         raise RuntimeError(f"Cannot get position mode: {data}")
     state.position_mode_cache = bool(data.get("dualSidePosition", False))
-    print("📌 Position mode:", "HEDGE" if state.position_mode_cache else "ONE-WAY")
+    log.info(f"📌 Position mode: {'HEDGE' if state.position_mode_cache else 'ONE-WAY'}")
     return state.position_mode_cache
 
 
@@ -647,12 +650,12 @@ def discover_algo_list_endpoint(symbol):
         if orders is None:
             continue
         state.algo_list_endpoint = endpoint
-        print(f"✅ Algo order жагсаах endpoint олдлоо: {endpoint}")
+        log.info(f"✅ Algo order жагсаах endpoint олдлоо: {endpoint}")
         return endpoint
 
     # Үр дүнг кэшилсэн тул энэ хэсэг сесс тутамд нэг л удаа ажиллана
     state.algo_list_endpoint = ""
-    print("🚨 Algo order жагсаах endpoint олдсонгүй — SL/TP цуцлалт ажиллахгүй")
+    log.error("🚨 Algo order жагсаах endpoint олдсонгүй — SL/TP цуцлалт ажиллахгүй")
     send_telegram(format_block("ALGO ORDER ENDPOINT ОЛДСОНГҮЙ", "🚨", [
         ("Туршсан", ", ".join(ALGO_LIST_ENDPOINT_CANDIDATES)),
         ("Үр дагавар", "Хуучин SL/TP цуцлагдахгүй — давхардаж хуримтлагдана"),
@@ -700,7 +703,7 @@ def cancel_all_algo_orders(symbol):
             continue
         result = send_signed_request("DELETE", "/fapi/v1/algoOrder", params)
         if is_api_error(result):
-            print(f"⚠️ {symbol}: algo order цуцлагдсангүй {params}: {result}")
+            log.warning(f"⚠️ {symbol}: algo order цуцлагдсангүй {params}: {result}")
         results.append(result)
     return results
 
@@ -753,7 +756,7 @@ def get_order_book(symbol, limit=20):
         asks = [[float(a[0]), float(a[1])] for a in data.get("asks", [])]
         return bids, asks
     except Exception as e:
-        print(f"⚠️ Order book error {symbol}: {e}")
+        log.warning(f"⚠️ Order book error {symbol}: {e}")
         return [], []
 
 def find_strong_levels(df, lookback=100):
@@ -822,7 +825,7 @@ def send_chart(symbol, df, signal=None, score=None):
         caption = f"📊 {symbol} | Signal: {signal}" if signal else f"📊 {symbol}"
         return send_telegram_photo(buf.getvalue(), caption)
     except Exception as e:
-        print(f"❌ Chart generation error: {e}")
+        log.error(f"❌ Chart generation error: {e}")
         return False
 
 
@@ -892,7 +895,7 @@ def get_funding_rate(symbol):
         data = send_public_request("/fapi/v1/premiumIndex", {"symbol": symbol})
         return safe_float(data.get("lastFundingRate", 0))
     except Exception as e:
-        print(f"⚠️ Funding rate error {symbol}: {e}")
+        log.warning(f"⚠️ Funding rate error {symbol}: {e}")
         return 0.0
 
 def get_mtf_signal(symbol):
@@ -917,7 +920,7 @@ def get_mtf_signal(symbol):
         if trend_4h == "SELL" and trend_1h == "SELL": return "BEARISH"
         return "NEUTRAL"
     except Exception as e:
-        print(f"⚠️ MTF error {symbol}: {e}")
+        log.warning(f"⚠️ MTF error {symbol}: {e}")
         return "NEUTRAL"
 
 
@@ -1157,7 +1160,7 @@ def calculate_correlation(symbol1, symbol2, lookback=50):
         corr = returns1.loc[valid_idx].corr(returns2.loc[valid_idx])
         return corr if not np.isnan(corr) else 0.0
     except Exception as e:
-        print(f"⚠️ Correlation error {symbol1}-{symbol2}: {e}")
+        log.warning(f"⚠️ Correlation error {symbol1}-{symbol2}: {e}")
         return 0.0
 
 
@@ -1170,7 +1173,7 @@ def check_min_notional(symbol, price, quantity):
     if info and info.get("minNotional"):
         min_notional = safe_float(info["minNotional"])
         if min_notional > 0 and price * quantity < min_notional:
-            print(f"⚠️ Notional {price*quantity:.2f} < minNotional {min_notional}")
+            log.warning(f"⚠️ Notional {price*quantity:.2f} < minNotional {min_notional}")
             return False
     return True
 
@@ -1199,12 +1202,12 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
                     continue
                 corr = calculate_correlation_cached(symbol, sym, CORRELATION_LOOKBACK)
                 if abs(corr) > CORRELATION_THRESHOLD:
-                    print(f"🔴 SKIPPED {symbol}: Correlation with {sym} = {corr:.2f}")
+                    log.info(f"🔴 SKIPPED {symbol}: Correlation with {sym} = {corr:.2f}")
                     return None
 
         close = df["close"].iloc[-1]
         if close <= 0:
-            print(f"⚠️ {symbol}: үнэ 0 ирлээ — алгаслаа")
+            log.warning(f"⚠️ {symbol}: үнэ 0 ирлээ — алгаслаа")
             return None
 
         adx = calculate_adx(df).iloc[-1]
@@ -1223,7 +1226,7 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         
         support, resistance = find_strong_levels(df)
         if support and resistance:
-            print(f"🔹 {symbol} Support: {support:.6g} | Resistance: {resistance:.6g}")
+            log.info(f"🔹 {symbol} Support: {support:.6g} | Resistance: {resistance:.6g}")
         
         sentiment = 0.0
         if funding_rate > FUNDING_SENTIMENT_THRESHOLD:
@@ -1299,7 +1302,7 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
             "strategies": strategy_results
         }
     except Exception as e:
-        print(f"❌ analyze_coin {symbol}: {e}")
+        log.error(f"❌ analyze_coin {symbol}: {e}")
         return None
 
 
@@ -1308,9 +1311,9 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
 # ==========================================================
 
 def screen_coins():
-    print("\n" + "=" * 70)
-    print(f"🔍 MARKET SCREENING {datetime.now().strftime('%H:%M:%S')}")
-    print("=" * 70)
+    log.info("\n" + "=" * 70)
+    log.info(f"🔍 MARKET SCREENING {datetime.now().strftime('%H:%M:%S')}")
+    log.info("=" * 70)
 
     skipped_reasons = []
 
@@ -1344,7 +1347,7 @@ def screen_coins():
         # дараа ихэвчлэн 2 л үлддэг байв.
         for best in candidates[:MAX_CANDIDATES_PER_STRATEGY]:
             strategy_candidates.append(best)
-            print(f"🎯 {strategy:<30} → {best['symbol']:<10} {best['signal']:<4} Score={best['score']:.2f}")
+            log.info(f"🎯 {strategy:<30} → {best['symbol']:<10} {best['signal']:<4} Score={best['score']:.2f}")
 
     by_symbol = defaultdict(list)
     for candidate in strategy_candidates:
@@ -1354,7 +1357,7 @@ def screen_coins():
         winner = max(candidates, key=lambda x: x["score"])
         unique_candidates.append(winner)
         if len(candidates) > 1:
-            print(f"🔄 DUPLICATE {symbol}: WINNER {winner['strategy']}")
+            log.info(f"🔄 DUPLICATE {symbol}: WINNER {winner['strategy']}")
 
     # Оноогоор эрэмбэлнэ. Өмнө нь нэр дэвшигчид стратегийн дарааллаар байсан тул
     # эхний стратегийн сул signal (оноо 14) сүүлийн стратегийн хүчтэйг (оноо 27)
@@ -1377,7 +1380,7 @@ def screen_coins():
                     break
             if clash:
                 removed_by_correlation.append(coin["symbol"])
-                print(f"🔴 REMOVED {coin['symbol']}: high correlation with {clash}")
+                log.info(f"🔴 REMOVED {coin['symbol']}: high correlation with {clash}")
                 continue
             final_selected.append(coin)
             if len(final_selected) >= MAX_SELECTIONS:
@@ -1410,9 +1413,9 @@ def screen_coins():
     if low_score_signals:
         skipped_reasons.append(f"📉 Оноо хэт бага (MIN_SIGNAL_SCORE={MIN_SIGNAL_SCORE}): {', '.join(low_score_signals[:5])}")
 
-    print("\n🏆 FINAL SELECTION:")
+    log.info("\n🏆 FINAL SELECTION:")
     for i, coin in enumerate(selected, 1):
-        print(f"{i}. {coin['symbol']} | {coin['strategy']} | {coin['signal']} | Score={coin['score']:.2f}")
+        log.info(f"{i}. {coin['symbol']} | {coin['strategy']} | {coin['signal']} | Score={coin['score']:.2f}")
 
     if CHART_SEND_ON_SIGNAL:
         for coin in selected:
@@ -1465,7 +1468,7 @@ def send_selection_report(selected, all_candidates=None, skipped_reasons=None):
 # ==========================================================
 
 def run_backtest(symbol, strategy, days=30, interval="1h"):
-    print(f"\n🧪 Backtesting {strategy} on {symbol} for {days} days ({interval})")
+    log.info(f"\n🧪 Backtesting {strategy} on {symbol} for {days} days ({interval})")
     try:
         limit = days * 24 if interval == "1h" else days * 24 * 4 if interval == "15m" else days * 6
         df = get_klines(symbol, interval=interval, limit=min(limit, 1500))
@@ -1624,7 +1627,7 @@ def sync_existing_positions():
             strategy = saved["strategy"]
             opened_at = safe_float(saved.get("opened_at"), time.time())
             opened_at_ms = int(safe_float(saved.get("opened_at_ms"), opened_at * 1000))
-            print(f"🔄 RESTORED {symbol} → strategy={strategy} (хадгалсан бүртгэлээс)")
+            log.info(f"🔄 RESTORED {symbol} → strategy={strategy} (хадгалсан бүртгэлээс)")
         else:
             strategy = "RECOVERED"
             opened_at = time.time()
@@ -1657,13 +1660,13 @@ def sync_existing_positions():
         }
 
         if not has_protection:
-            print(f"🔄 RECOVERED {symbol} WITHOUT protection – rebuilding...")
+            log.info(f"🔄 RECOVERED {symbol} WITHOUT protection – rebuilding...")
             success, _, _ = rebuild_protection_orders(symbol, side, qty, entry, position_side)
             if not success:
                 state.unprotected_symbols.add(symbol)
                 send_telegram(format_block("RECOVERED POSITION WITHOUT PROTECTION", "🚨", [("Symbol", symbol)]))
         else:
-            print(f"🔄 RECOVERED POSITION: {symbol} (protected)")
+            log.info(f"🔄 RECOVERED POSITION: {symbol} (protected)")
 
 
 # ==========================================================
@@ -1688,7 +1691,7 @@ def get_trade_realized_pnl(symbol, opened_at_ms):
             pnl += safe_float(trade.get("realizedPnl", 0))
         return pnl
     except Exception as e:
-        print(f"❌ PnL error {symbol}: {e}")
+        log.error(f"❌ PnL error {symbol}: {e}")
         return 0.0
 
 
@@ -1745,7 +1748,7 @@ def finalize_trade(symbol, trade_data):
     opened_at_ms = trade_data.get("opened_at_ms", int(trade_data.get("opened_at", time.time()) * 1000))
     pnl = get_trade_realized_pnl(symbol, opened_at_ms)
     record_realized_pnl(strategy, pnl)
-    print(f"🔴 CLOSED {symbol} | Strategy={strategy} | PnL=${pnl:.2f}")
+    log.info(f"🔴 CLOSED {symbol} | Strategy={strategy} | PnL=${pnl:.2f}")
     send_telegram(
         format_block(
             "ПОЗИЦ ХААГДЛАА",
@@ -1776,7 +1779,7 @@ def get_actual_leverage(symbol):
     # safe_float нь "0"-г хүчинтэй тоо гэж үзэх тул default руу шилждэггүй.
     # Тэглэсэн leverage нь margin тооцоололд 0-д хуваах алдаа өгч бүтэн циклийг унагаана.
     if lev <= 0:
-        print(f"⚠️ {symbol}: leverage={lev} ирлээ — {LEVERAGE}x гэж үзэв")
+        log.warning(f"⚠️ {symbol}: leverage={lev} ирлээ — {LEVERAGE}x гэж үзэв")
         return LEVERAGE
     state.leverage_cache[symbol] = lev
     return lev
@@ -1792,7 +1795,7 @@ def ensure_leverage(symbol, leverage=LEVERAGE):
         if safe_float(result.get("code"), 0) == -4141:
             state.leverage_cache[symbol] = leverage
             return True
-        print(f"❌ {symbol}: leverage error {result}")
+        log.error(f"❌ {symbol}: leverage error {result}")
         return False
     state.leverage_cache[symbol] = leverage
     return True
@@ -1808,7 +1811,7 @@ def calculate_trailing_activation(symbol, signal, entry_price):
     except PositionFetchError as e:
         # Mark price нь зөвхөн нарийвчлалд хэрэгтэй — уншигдаагүй бол entry-ээр
         # тооцоолно, эс тэгвээс хамгаалалтын захиалга огт үүсэхгүй үлдэнэ.
-        print(f"⚠️ Trailing activation {symbol}: mark price уншигдсангүй, entry ашиглав ({e})")
+        log.warning(f"⚠️ Trailing activation {symbol}: mark price уншигдсангүй, entry ашиглав ({e})")
         positions = []
 
     mark_price = entry_price
@@ -1847,20 +1850,20 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
     # нэмэгдэж, хуучин үнийн түвшний stop амьд үлдэнэ — тиймээс чимээгүй өнгөрөхгүй.
     cleanup = cancel_all_symbol_orders(symbol)
     if is_api_error(cleanup.get("algo")):
-        print(f"⚠️ {symbol}: хуучин conditional захиалгууд цуцлагдсангүй: {cleanup['algo']}")
+        log.warning(f"⚠️ {symbol}: хуучин conditional захиалгууд цуцлагдсангүй: {cleanup['algo']}")
 
     # 1) Hard emergency stop — ALWAYS required. A trailing stop only arms after
     #    price moves in our favour by TRAILING_ACTIVATION_PCT, so a position that
     #    goes straight against us would otherwise have no stop at all.
     sl = place_stop_loss_order(symbol, close_side, quantity, emergency_sl_price, position_side)
     if is_api_error(sl):
-        print(f"❌ {symbol}: emergency stop-loss failed: {sl}")
+        log.error(f"❌ {symbol}: emergency stop-loss failed: {sl}")
         return False, tp_price, None
 
     # 2) Take profit — required.
     tp = place_take_profit_order(symbol, close_side, quantity, tp_price, position_side)
     if is_api_error(tp):
-        print(f"❌ {symbol}: take-profit failed: {tp}")
+        log.error(f"❌ {symbol}: take-profit failed: {tp}")
         return False, tp_price, None
 
     # 3) Trailing stop — best effort. Adds upside capture on top of the hard
@@ -1869,7 +1872,7 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
     if activation_price is not None:
         trailing = place_trailing_stop_order(symbol, close_side, quantity, TRAILING_CALLBACK_RATE, activation_price, position_side)
         if is_api_error(trailing):
-            print(f"⚠️ {symbol}: trailing stop not placed ({trailing}) — emergency SL still active")
+            log.warning(f"⚠️ {symbol}: trailing stop not placed ({trailing}) — emergency SL still active")
             activation_price = None
 
     state.unprotected_symbols.discard(symbol)
@@ -1882,7 +1885,7 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
 
 def execute_trades(selected_coins, total_balance):
     if state.safety_lock:
-        print("🔒 SAFETY LOCK: new trades disabled")
+        log.info("🔒 SAFETY LOCK: new trades disabled")
         return
     if not selected_coins:
         return
@@ -1904,7 +1907,7 @@ def execute_trades(selected_coins, total_balance):
         if signal not in ["BUY", "SELL"]:
             continue
         if symbol in existing_symbols:
-            print(f"⏸️ {symbol}: already has position")
+            log.info(f"⏸️ {symbol}: already has position")
             continue
         if total_balance < MIN_BALANCE_USDT:
             send_telegram(format_block("БАЛАНС БАГА", "⚠️", [("Balance", f"${total_balance:.2f}")]))
@@ -1912,11 +1915,11 @@ def execute_trades(selected_coins, total_balance):
 
         margin = total_balance * TRADE_ALLOCATION
         if symbol in state.unprotected_symbols:
-            print(f"⏸️ {symbol}: unprotected, skip new trade")
+            log.info(f"⏸️ {symbol}: unprotected, skip new trade")
             continue
 
         if current_margin_used + margin > max_margin:
-            print(f"⏸️ {symbol}: portfolio margin limit")
+            log.info(f"⏸️ {symbol}: portfolio margin limit")
             continue
 
         if not ensure_leverage(symbol, LEVERAGE):
@@ -1932,7 +1935,7 @@ def execute_trades(selected_coins, total_balance):
         if info and info.get("minQty"):
             min_qty = safe_float(info.get("minQty"))
             if min_qty > 0 and quantity < min_qty:
-                print(f"⏸️ {symbol}: quantity below minQty")
+                log.info(f"⏸️ {symbol}: quantity below minQty")
                 continue
         if not check_min_notional(symbol, price, quantity):
             continue
@@ -1942,12 +1945,12 @@ def execute_trades(selected_coins, total_balance):
         try:
             cancel_all_symbol_orders(symbol)
         except Exception as e:
-            print(f"⚠️ Order cleanup {symbol}: {e}")
+            log.warning(f"⚠️ Order cleanup {symbol}: {e}")
 
         order_side = "BUY" if signal == "BUY" else "SELL"
         close_side = "SELL" if signal == "BUY" else "BUY"
         position_side = "LONG" if signal == "BUY" else "SHORT"
-        print(f"\n🚀 OPEN {symbol}\nStrategy={strategy}\nSignal={signal}\nQty={quantity}")
+        log.info(f"\n🚀 OPEN {symbol}\nStrategy={strategy}\nSignal={signal}\nQty={quantity}")
 
         order = place_market_order(symbol, order_side, quantity, reduce_only=False, position_side=position_side)
         if is_api_error(order):
@@ -1960,7 +1963,7 @@ def execute_trades(selected_coins, total_balance):
         except PositionFetchError as e:
             # Захиалга аль хэдийн илгээгдсэн — жагсаалт уншигдаагүй бол доорх
             # fill шалгалт руу шилжиж, захиалгын хариунаас хамгаалалт барина.
-            print(f"⚠️ {symbol}: захиалгын дараах позиц уншигдсангүй ({e})")
+            log.warning(f"⚠️ {symbol}: захиалгын дараах позиц уншигдсангүй ({e})")
             current_positions = []
         actual_position = None
         for p in current_positions:
@@ -1979,7 +1982,7 @@ def execute_trades(selected_coins, total_balance):
             executed_qty = safe_float(order.get("executedQty"), 0.0)
             avg_price = safe_float(order.get("avgPrice"), 0.0)
             if executed_qty <= 0 or avg_price <= 0:
-                print(f"⚠️ {symbol}: market order did not fill (status={order.get('status')}) — skipping")
+                log.warning(f"⚠️ {symbol}: market order did not fill (status={order.get('status')}) — skipping")
                 send_telegram(format_block("ORDER NOT FILLED", "⚠️", [
                     ("Symbol", symbol),
                     ("Status", str(order.get("status"))),
@@ -2089,14 +2092,14 @@ def close_one_position(pos):
     quantity = round_quantity(symbol, abs(amount))
     if quantity is None:
         quantity = abs(amount)
-        print(f"⚠️ {symbol}: no exchange info — closing with raw position size {quantity}")
+        log.warning(f"⚠️ {symbol}: no exchange info — closing with raw position size {quantity}")
     position_side = pos.get("positionSide", "BOTH")
-    print(f"🔒 CLOSE {symbol} | {close_side} | {quantity} | PositionSide={position_side}")
+    log.info(f"🔒 CLOSE {symbol} | {close_side} | {quantity} | PositionSide={position_side}")
     result = place_market_order(symbol, close_side, quantity, reduce_only=True, position_side=position_side)
     if is_api_error(result):
-        print(f"❌ CLOSE FAILED {symbol}: {result}")
+        log.error(f"❌ CLOSE FAILED {symbol}: {result}")
         return False
-    print(f"✅ CLOSE ORDER SENT {symbol}")
+    log.info(f"✅ CLOSE ORDER SENT {symbol}")
     return True
 
 
@@ -2105,28 +2108,28 @@ def close_one_position(pos):
 # ==========================================================
 
 def close_all_positions_and_verify():
-    print("\n" + "=" * 70)
-    print("🔒 CLOSE ALL POSITIONS")
-    print("=" * 70)
+    log.info("\n" + "=" * 70)
+    log.info("🔒 CLOSE ALL POSITIONS")
+    log.info("=" * 70)
     try:
         positions = get_positions()
     except PositionFetchError as e:
         # Позиц үлдсэн эсэхийг мэдэхгүй байж "бүгд хаагдлаа" гэж хэлэх нь
         # хамгийн аюултай худал — бүтэлгүйтсэн гэж тооцно.
-        print(f"🚨 CLOSE ALL: позиц уншиж чадсангүй ({e})")
+        log.error(f"🚨 CLOSE ALL: позиц уншиж чадсангүй ({e})")
         return False
 
     if not positions:
-        print("✅ No open positions.")
+        log.info("✅ No open positions.")
         return True
     symbols = {p["symbol"] for p in positions}
 
     for symbol in symbols:
         try:
             result = cancel_all_symbol_orders(symbol)
-            print(f"🧹 Cancel {symbol}: {result}")
+            log.info(f"🧹 Cancel {symbol}: {result}")
         except Exception as e:
-            print(f"⚠️ Cancel error {symbol}: {e}")
+            log.warning(f"⚠️ Cancel error {symbol}: {e}")
 
     time.sleep(1)
 
@@ -2140,17 +2143,17 @@ def close_all_positions_and_verify():
             remaining = get_positions()
         except PositionFetchError as e:
             # Баталгаажуулж чадаагүй мөчлөгийг "хаагдсан" гэж үзэхгүй, дахин оролдоно
-            print(f"⏳ CLOSE VERIFY {attempt}/{CLOSE_VERIFY_ATTEMPTS} | позиц уншигдсангүй ({e})")
+            log.info(f"⏳ CLOSE VERIFY {attempt}/{CLOSE_VERIFY_ATTEMPTS} | позиц уншигдсангүй ({e})")
             continue
         if not remaining:
-            print("✅ ALL POSITIONS CLOSED")
+            log.info("✅ ALL POSITIONS CLOSED")
             for symbol in symbols:
                 try:
                     cancel_all_symbol_orders(symbol)
                 except Exception:
                     pass
             return True
-        print(f"⏳ CLOSE VERIFY {attempt}/{CLOSE_VERIFY_ATTEMPTS} | Remaining={len(remaining)}")
+        log.info(f"⏳ CLOSE VERIFY {attempt}/{CLOSE_VERIFY_ATTEMPTS} | Remaining={len(remaining)}")
         for pos in remaining:
             close_one_position(pos)
             time.sleep(0.4)
@@ -2158,10 +2161,10 @@ def close_all_positions_and_verify():
     try:
         remaining = get_positions()
     except PositionFetchError as e:
-        print(f"🚨 POSITION CLOSE UNVERIFIED ({e})")
+        log.error(f"🚨 POSITION CLOSE UNVERIFIED ({e})")
         return False
     if remaining:
-        print("🚨 POSITION CLOSE INCOMPLETE")
+        log.error("🚨 POSITION CLOSE INCOMPLETE")
         return False
     return True
 
@@ -2259,7 +2262,7 @@ def handle_target_reached(total_unrealized):
 # ==========================================================
 
 def target_cooldown():
-    print("\n😴 TARGET COOLDOWN")
+    log.info("\n😴 TARGET COOLDOWN")
     cooldown_end = time.time() + TARGET_COOLDOWN_SEC
     while True:
         remaining = cooldown_end - time.time()
@@ -2269,7 +2272,7 @@ def target_cooldown():
         seconds = int(remaining % 60)
         print(f"\r😴 COOLDOWN {minutes:02d}:{seconds:02d}", end="", flush=True)
         time.sleep(5)
-    print("\n")
+    log.info("\n")
     send_telegram(
         format_block(
             "10 МИНУТЫН COOLDOWN ДУУСЛАА",
@@ -2307,7 +2310,7 @@ def check_drawdown_circuit_breaker():
         state.safety_lock = True
         state.drawdown_lock_active = True
         state.drawdown_halt = True
-        print(f"🚨 MAX DRAWDOWN HIT: {drawdown_pct:.2f}% (limit {MAX_SESSION_DRAWDOWN_PCT}%) — HARD STOP")
+        log.error(f"🚨 MAX DRAWDOWN HIT: {drawdown_pct:.2f}% (limit {MAX_SESSION_DRAWDOWN_PCT}%) — HARD STOP")
         send_telegram(
             format_block(
                 "MAX DRAWDOWN CIRCUIT BREAKER",
@@ -2346,7 +2349,7 @@ def get_next_cpi_event():
                 if event_time_utc > now:
                     return event_time_utc
     except Exception as e:
-        print(f"⚠️ News calendar error: {e}")
+        log.warning(f"⚠️ News calendar error: {e}")
     return None
 
 
@@ -2372,16 +2375,16 @@ def check_news_status():
     if 0 < diff < NEWS_PAUSE_BEFORE:
         state.news_mode_active = True
         state.news_trade_done = False
-        print(f"📰 News approaching in {diff:.0f} min. Pausing new technical trades.")
+        log.info(f"📰 News approaching in {diff:.0f} min. Pausing new technical trades.")
         return
 
     if -NEWS_WAIT_AFTER < diff < 0:
         state.news_mode_active = True
-        print(f"📰 News just released. Waiting {NEWS_WAIT_AFTER} min for stability...")
+        log.info(f"📰 News just released. Waiting {NEWS_WAIT_AFTER} min for stability...")
         return
 
     if diff <= -NEWS_WAIT_AFTER and state.news_mode_active and not state.news_trade_done:
-        print("📰 News cooldown finished. Executing post-news trade...")
+        log.info("📰 News cooldown finished. Executing post-news trade...")
         execute_post_news_trade()
         state.news_trade_done = True
         state.news_mode_active = False
@@ -2389,7 +2392,7 @@ def check_news_status():
 
     if diff <= - (NEWS_WAIT_AFTER + 30) and state.news_mode_active:
         state.news_mode_active = False
-        print("✅ News window closed. Resuming normal trading.")
+        log.info("✅ News window closed. Resuming normal trading.")
 
 def execute_post_news_trade():
     if state.news_trade_done:
@@ -2405,7 +2408,7 @@ def execute_post_news_trade():
         move_pct = (last_close - first_close) / first_close * 100
 
         if abs(move_pct) < NEWS_MIN_MOVE:
-            print(f"⏸️ {symbol} move {move_pct:.2f}% < {NEWS_MIN_MOVE}%, skipping.")
+            log.info(f"⏸️ {symbol} move {move_pct:.2f}% < {NEWS_MIN_MOVE}%, skipping.")
             continue
 
         side = "BUY" if move_pct > 0 else "SELL"
@@ -2468,7 +2471,7 @@ def monitor_positions():
     except PositionFetchError as e:
         # Позицын жагсаалт тодорхойгүй бол юу ч хаагдсан гэж үзэхгүй — эс тэгвээс
         # хамгаалалтын захиалгуудыг амьд позиц дээрээс цуцалчихна.
-        print(f"⚠️ Monitor: позиц уншиж чадсангүй — энэ мөчлөгийг алгаслаа ({e})")
+        log.warning(f"⚠️ Monitor: позиц уншиж чадсангүй — энэ мөчлөгийг алгаслаа ({e})")
         return
 
     current_symbols = {p["symbol"] for p in positions}
@@ -2622,7 +2625,7 @@ def safety_recovery():
     except PositionFetchError as e:
         # Позиц үлдсэн эсэхийг мэдэхгүй бол түгжээг тайлахгүй — тайлчихвал
         # хамгаалалтгүй позиц дээр шинэ арилжаа нэмэгдэх эрсдэлтэй.
-        print(f"⚠️ Safety recovery: позиц уншиж чадсангүй — түгжээ хэвээр ({e})")
+        log.warning(f"⚠️ Safety recovery: позиц уншиж чадсангүй — түгжээ хэвээр ({e})")
         return False
 
     if not positions:
@@ -2663,18 +2666,22 @@ def safety_recovery():
 # ==========================================================
 
 def main():
+    # Log тохиргоог хамгийн түрүүнд — эс тэгвээс эхний мөрүүд цаг хугацаагүй гарна.
+    # STATE_DIR нь persistent volume дээр байвал log файл руу ч бичнэ.
+    log_path = setup_logging(STATE_DIR, STATE_DIR_IS_PERSISTENT)
 
-    print("=" * 70)
-    print("🤖 SMART BOT V2 (SUPERTREND + CHOP + MTF + VWAP + FUNDING + ORDERBOOK + CHART)")
-    print("🎯 UNREALIZED $300 → REALIZED")
-    print("😴 10 MIN COOLDOWN")
-    print("🔄 AUTO RESUME")
-    print("=" * 70)
+    log.info("=" * 70)
+    log.info("🤖 SMART BOT V2 (SUPERTREND + CHOP + MTF + VWAP + FUNDING + ORDERBOOK + CHART)")
+    log.info("🎯 UNREALIZED $300 → REALIZED")
+    log.info("😴 10 MIN COOLDOWN")
+    log.info("🔄 AUTO RESUME")
+    log.info(f"📝 Log: консол{f' + {log_path}' if log_path else ' (файл руу бичихгүй)'}")
+    log.info("=" * 70)
 
     try:
         validate_config()
     except Exception as e:
-        print(f"❌ CONFIG ERROR: {e}")
+        log.error(f"❌ CONFIG ERROR: {e}")
         return
 
     check_state_storage()
@@ -2685,14 +2692,14 @@ def main():
         load_exchange_info()
         get_position_mode()
     except Exception as e:
-        print(f"⚠️ Exchange setup: {e}")
+        log.warning(f"⚠️ Exchange setup: {e}")
 
     load_strategy_state()
 
     try:
         sync_existing_positions()
     except Exception as e:
-        print(f"❌ Position sync: {e}")
+        log.error(f"❌ Position sync: {e}")
 
     try:
         state.session_start_balance = get_usdt_balance()
@@ -2716,7 +2723,7 @@ def main():
         if _restored_peak > state.session_peak_balance:
             state.session_peak_balance = _restored_peak
         state.session_realized_pnl = safe_float(_saved_session.get("session_realized_pnl"), 0.0)
-        print(f"♻️ Restored session state — peak ${state.session_peak_balance:,.2f}, realized ${state.session_realized_pnl:,.2f}")
+        log.info(f"♻️ Restored session state — peak ${state.session_peak_balance:,.2f}, realized ${state.session_realized_pnl:,.2f}")
     save_session_state()
 
     send_telegram(
@@ -2743,7 +2750,7 @@ def main():
 
     if BACKTEST_ENABLED:
         try:
-            print("\n🧪 Running initial backtest for all strategies...")
+            log.info("\n🧪 Running initial backtest for all strategies...")
             test_symbols = SYMBOLS_POOL[:2]
             for strategy in STRATEGY_NAMES:
                 if strategy == "GRID_TRADING":
@@ -2754,14 +2761,14 @@ def main():
                         send_telegram(report)
                     time.sleep(1)
         except Exception as e:
-            print(f"❌ Backtest error: {e}")
+            log.error(f"❌ Backtest error: {e}")
 
     try:
         selected = screen_coins()
         execute_trades(selected, get_usdt_balance())
     except Exception as e:
         error = traceback.format_exc()
-        print(f"❌ Initial error:\n{error}")
+        log.error(f"❌ Initial error:\n{error}")
         send_telegram(format_block("АНХНЫ АЛДАА", "❌", [("Error", str(e)[:400])]))
 
     last_selection_time = time.time()
@@ -2778,7 +2785,7 @@ def main():
                     if remaining:
                         close_all_positions_and_verify()
                 except Exception as e:
-                    print(f"❌ Drawdown halt cleanup: {e}")
+                    log.error(f"❌ Drawdown halt cleanup: {e}")
                 time.sleep(MONITOR_INTERVAL_SEC)
                 continue
 
@@ -2790,20 +2797,20 @@ def main():
             try:
                 check_news_status()
             except Exception as e:
-                print(f"⚠️ News check error: {e}")
+                log.warning(f"⚠️ News check error: {e}")
 
             if state.news_mode_active:
                 try:
                     monitor_positions()
                 except Exception as e:
-                    print(f"❌ Monitor error during news: {e}")
+                    log.error(f"❌ Monitor error during news: {e}")
                 time.sleep(MONITOR_INTERVAL_SEC)
                 continue
 
             try:
                 check_drawdown_circuit_breaker()
             except Exception as e:
-                print(f"❌ Drawdown check: {e}")
+                log.error(f"❌ Drawdown check: {e}")
             if state.safety_lock:
                 time.sleep(MONITOR_INTERVAL_SEC)
                 continue
@@ -2811,16 +2818,16 @@ def main():
             try:
                 monitor_positions()
             except Exception as e:
-                print(f"❌ Monitor: {e}")
+                log.error(f"❌ Monitor: {e}")
 
             try:
                 positions = get_positions()
                 total_unrealized = sum(p["unRealizedProfit"] for p in positions)
             except Exception as e:
-                print(f"❌ Target check: {e}")
+                log.error(f"❌ Target check: {e}")
                 total_unrealized = 0.0
 
-            print(f"📡 {datetime.now().strftime('%H:%M:%S')} | Positions={len(positions) if 'positions' in locals() else 0} | Unrealized=${total_unrealized:.2f} / ${TARGET_PROFIT:.2f}")
+            log.info(f"📡 {datetime.now().strftime('%H:%M:%S')} | Positions={len(positions) if 'positions' in locals() else 0} | Unrealized=${total_unrealized:.2f} / ${TARGET_PROFIT:.2f}")
 
             if total_unrealized >= TARGET_PROFIT:
                 success = handle_target_reached(total_unrealized)
@@ -2837,7 +2844,7 @@ def main():
                         selected = screen_coins()
                         execute_trades(selected, get_usdt_balance())
                     except Exception as e:
-                        print(f"❌ Auto-resume screening error: {e}")
+                        log.error(f"❌ Auto-resume screening error: {e}")
                         send_telegram(format_block("AUTO RESUME ERROR", "❌", [("Error", str(e)[:400])]))
                     continue
                 else:
@@ -2847,38 +2854,38 @@ def main():
 
             if current_time - last_selection_time >= SELECTION_INTERVAL_MINUTES * 60:
                 cycle_count += 1
-                print("\n" + "=" * 70)
-                print(f"🔄 CYCLE #{cycle_count}")
-                print(datetime.now())
-                print("=" * 70)
+                log.info("\n" + "=" * 70)
+                log.info(f"🔄 CYCLE #{cycle_count}")
+                log.info(datetime.now())
+                log.info("=" * 70)
 
                 try:
                     send_cycle_summary()
                 except Exception as e:
-                    print(f"❌ Summary: {e}")
+                    log.error(f"❌ Summary: {e}")
 
                 try:
                     update_strategy_cooldowns()
                 except Exception as e:
-                    print(f"❌ Cooldown: {e}")
+                    log.error(f"❌ Cooldown: {e}")
 
                 try:
                     selected = screen_coins()
                 except Exception as e:
-                    print(f"❌ Screening: {e}")
+                    log.error(f"❌ Screening: {e}")
                     selected = []
                     send_telegram("⚠️ Скрининг хийхэд алдаа гарлаа. Дараагийн циклд дахин оролдоно.")
 
                 try:
                     execute_trades(selected, get_usdt_balance())
                 except Exception as e:
-                    print(f"❌ Execute: {e}")
+                    log.error(f"❌ Execute: {e}")
                     send_telegram(format_block("АРИЛЖААНЫ АЛДАА", "❌", [("Error", str(e)[:400])]))
 
                 try:
                     send_performance_report()
                 except Exception as e:
-                    print(f"❌ Performance: {e}")
+                    log.error(f"❌ Performance: {e}")
 
                 last_selection_time = current_time
 
@@ -2886,19 +2893,19 @@ def main():
                 try:
                     send_performance_report()
                 except Exception as e:
-                    print(f"❌ Daily report: {e}")
+                    log.error(f"❌ Daily report: {e}")
                 performance_report_time = current_time
 
             time.sleep(MONITOR_INTERVAL_SEC)
 
         except KeyboardInterrupt:
-            print("\n🛑 BOT STOPPED")
+            log.info("\n🛑 BOT STOPPED")
             send_telegram(format_block("БОТ ЗОГСЛОО", "🛑", [("Учир", "KeyboardInterrupt")]))
             break
 
         except Exception as e:
             error = traceback.format_exc()
-            print(f"❌ MAIN ERROR\n{error}")
+            log.error(f"❌ MAIN ERROR\n{error}")
             try:
                 send_telegram(format_block("ГОЛ АЛДАА", "❌", [("Traceback", error[:500])]))
             except Exception:
