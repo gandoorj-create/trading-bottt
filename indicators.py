@@ -6,6 +6,30 @@ import numpy as np
 import pandas as pd
 
 
+def resample_ohlcv(df, factor=4):
+    """factor ширхэг лааг нэг том лаа болгон нэгтгэнэ (1h × 4 → 4h).
+
+    Биржээс 4h лаа тусад нь татахгүй, ижил df-ээс гаргана. Учир нь backtest нь
+    түүхэн цонхоор алхдаг тул тэр үед одоогийн 4h датаг татвал lookahead алдаа
+    болно — амьд арилжаа ба backtest хоёр өөр логикоор ажиллана.
+
+    Урд талаас нь тайрч бүлэглэнэ, ингэснээр сүүлийн бүлэг үргэлж бүтэн байх
+    ба хамгийн сүүлийн лаа заавал багтана.
+    """
+    n = len(df)
+    usable = n - (n % factor)
+    if usable < factor:
+        return None
+    trimmed = df.iloc[n - usable:]
+    return trimmed.groupby(np.arange(usable) // factor).agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+    ).reset_index(drop=True)
+
+
 def calculate_chop(df, period=14):
     high = df["high"]
     low = df["low"]

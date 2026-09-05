@@ -90,6 +90,16 @@ FUNDING_ENABLED = _cfg.get("funding_enabled", True)
 BREAKOUT_VOLUME_RATIO = _cfg.get("breakout_volume_ratio", 1.5)
 MACD_MIN_VOLUME_RATIO = _cfg.get("macd_min_volume_ratio", 1.0)
 
+# ---- TREND_FOLLOWING: өндөр давтамжийн (4h) макро тренд ----
+# slope босго 1h-ийн 0.5%-аас өндөр: 5 барын налуу 4h дээр 20 цагийг хамардаг
+# (1h дээр 5 цаг) тул байгалиасаа ~3 дахин том утга гардаг.
+TREND_HTF_FACTOR = _cfg.get("trend_htf_factor", 4)
+TREND_HTF_FAST_EMA = _cfg.get("trend_htf_fast_ema", 20)
+TREND_HTF_MID_EMA = _cfg.get("trend_htf_mid_ema", 50)
+TREND_HTF_SLOW_EMA = _cfg.get("trend_htf_slow_ema", 100)
+TREND_HTF_MIN_ADX = _cfg.get("trend_htf_min_adx", 30)
+TREND_HTF_MIN_SLOPE = _cfg.get("trend_htf_min_slope", 1.0)
+
 # ---- ШИНЭ: News Trading ----
 NEWS_TRADING = _cfg.get("news_trading", {})
 NEWS_ENABLED = NEWS_TRADING.get("enabled", False)

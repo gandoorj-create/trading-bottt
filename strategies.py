@@ -68,17 +68,15 @@ def determine_regime(chop, adx, ema_slope, atr_pct):
 
 
 def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
+    # 1h EMA20/50/200, adx, ema_slope нь зөвхөн TREND_FOLLOWING-д хэрэглэгддэг
+    # байсан бөгөөд тэр нь 4h руу шилжсэн тул энд тооцоолохоо больсон —
+    # стратеги бүрийн дуудалт тутамд дэмий тооцоо хийхгүй.
     close = df["close"].iloc[-1]
-    ema20 = indicators.calculate_ema(df, 20)
-    ema50 = indicators.calculate_ema(df, 50)
-    ema200 = indicators.calculate_ema(df, 200)
     rsi_series = indicators.calculate_rsi(df)
     rsi = rsi_series.iloc[-1]
     macd, macd_signal, histogram = indicators.calculate_macd(df)
     upper, middle, lower = indicators.calculate_bollinger(df)
-    adx = indicators.calculate_adx(df).iloc[-1]
-    ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
-    
+
     vwap = indicators.calculate_vwap(df).iloc[-1] if VWAP_ENABLED else close
 
     if strategy == "SUPERTREND":
@@ -131,9 +129,28 @@ def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
         if rsi > 70 and sentiment < 0.6: return "SELL"
 
     elif strategy == "TREND_FOLLOWING":
-        if adx > 30 and ema20.iloc[-1] > ema50.iloc[-1] > ema200.iloc[-1] and ema_slope > 0.5 and sentiment >= -0.3:
+        # Өндөр давтамжийн (4h) макро тренд. SUPERTREND нь 1h дээр эргэлтийн
+        # мөчийг барьдаг тактик стратеги — хоёулаа 1h дээр ажиллавал ижил
+        # горимд зэрэг өндөр оноо авч, портфель цэвэр тренд-хазайлттай болдог.
+        # 4h дээр шилжүүлснээр хугацааны давхрага үнэхээр өөр болно: EMA20/50/100
+        # нь 3–17 хоногийн тренд, харин chop дээр ADX 1h-д 25 орчим (босгонд
+        # аюултай ойрхон) байхад 4h-д 17 орчим унадаг.
+        htf = indicators.resample_ohlcv(df, TREND_HTF_FACTOR)
+        if htf is None or len(htf) < TREND_HTF_SLOW_EMA:
+            return "HOLD"
+        h_fast = indicators.calculate_ema(htf, TREND_HTF_FAST_EMA)
+        h_mid = indicators.calculate_ema(htf, TREND_HTF_MID_EMA)
+        h_slow = indicators.calculate_ema(htf, TREND_HTF_SLOW_EMA)
+        h_adx = indicators.calculate_adx(htf).iloc[-1]
+        h_slope = (h_mid.iloc[-1] - h_mid.iloc[-5]) / h_mid.iloc[-5] * 100
+
+        if (h_adx > TREND_HTF_MIN_ADX
+                and h_fast.iloc[-1] > h_mid.iloc[-1] > h_slow.iloc[-1]
+                and h_slope > TREND_HTF_MIN_SLOPE and sentiment >= -0.3):
             return "BUY"
-        if adx > 30 and ema20.iloc[-1] < ema50.iloc[-1] < ema200.iloc[-1] and ema_slope < -0.5 and sentiment <= 0.3:
+        if (h_adx > TREND_HTF_MIN_ADX
+                and h_fast.iloc[-1] < h_mid.iloc[-1] < h_slow.iloc[-1]
+                and h_slope < -TREND_HTF_MIN_SLOPE and sentiment <= 0.3):
             return "SELL"
     return "HOLD"
 

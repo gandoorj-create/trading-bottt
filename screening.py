@@ -54,8 +54,10 @@ def calculate_correlation(symbol1, symbol2, lookback=50):
 
 def analyze_coin(symbol, check_correlation=True, active_symbols=None):
     try:
-        # 260 closed bars so EMA-200 has enough history to be meaningful.
-        df = market_data.get_klines(symbol, "1h", 260)
+        # 600 хаагдсан лаа: 1h EMA-200-д (260 хангалттай байсан) төдийгүй
+        # TREND_FOLLOWING-ийн 4h EMA-100-д ч хүрэлцэнэ — 600 / 4 = 150 4h лаа.
+        # Нэг л хүсэлт, зөвхөн payload томрох тул зардал нь мэдэгдэхүйц биш.
+        df = market_data.get_klines(symbol, "1h", 600)
         if len(df) < 210:
             return None
 
@@ -86,7 +88,6 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
         atr_pct = atr / close * 100
         ema20 = indicators.calculate_ema(df, 20)
         ema50 = indicators.calculate_ema(df, 50)
-        ema200 = indicators.calculate_ema(df, 200)
         ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
         volume_ratio = indicators.calculate_volume_ratio(df)
         
@@ -116,6 +117,10 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
             )
             signal = strategies.generate_strategy_signal(strategy, df, sentiment, regime, chop)
             
+            # TREND_FOLLOWING нь 4h макро тренд дээр шийддэг тул энэ 1h шалгалт
+            # орох мөчийг тааруулах үүрэгтэй: макро өсөлт заасан ч 1h EMA20
+            # EMA50-аас доогуур байвал ойрын хугацааны хөдөлгөөн эсрэг байна
+            # гэсэн үг — хүлээнэ. Давхардсан шалгалт биш, өөр давхрага.
             if signal == "BUY" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] < ema50.iloc[-1]:
                 signal = "HOLD"
             if signal == "SELL" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] > ema50.iloc[-1]:

@@ -392,14 +392,46 @@ class TestGenerateStrategySignal:
         signal = strategies.generate_strategy_signal("RSI_STRATEGY", df, sentiment=-0.9, regime="RANGE")
         assert signal == "HOLD"
 
-    def test_trend_following_needs_trend_regime_alignment(self):
+    def test_trend_following_buys_a_sustained_uptrend(self):
+        # 600 1h лаа = 150 4h лаа — 4h EMA-100-д хүрэлцэнэ
+        df = noisy_uptrend_df(n=600, step=2.0)
+        assert strategies.generate_strategy_signal(
+            "TREND_FOLLOWING", df, sentiment=0.0, regime="STRONG_TREND") == "BUY"
+
+    def test_trend_following_blocked_by_negative_sentiment(self):
+        df = noisy_uptrend_df(n=600, step=2.0)
+        assert strategies.generate_strategy_signal(
+            "TREND_FOLLOWING", df, sentiment=-0.9, regime="STRONG_TREND") == "HOLD"
+
+    def test_trend_following_sells_a_sustained_downtrend(self):
+        df = make_df([1500.0 - i * 2.0 for i in range(600)])
+        assert strategies.generate_strategy_signal(
+            "TREND_FOLLOWING", df, sentiment=0.0, regime="STRONG_TREND") == "SELL"
+
+    def test_trend_following_holds_without_enough_4h_history(self):
+        # 260 1h лаа = 65 4h лаа — EMA-100 тооцоологдох боломжгүй тул
+        # таамаглахын оронд HOLD буцаана
         df = noisy_uptrend_df(n=260, step=2.0)
-        buy = strategies.generate_strategy_signal("TREND_FOLLOWING", df, sentiment=0.0, regime="STRONG_TREND")
-        # sentiment хэт сөрөг бол ижил өгөгдөл дээр ч BUY гарахгүй
-        blocked = strategies.generate_strategy_signal("TREND_FOLLOWING", df, sentiment=-0.9, regime="STRONG_TREND")
-        assert buy in ("BUY", "HOLD")
-        if buy == "BUY":
-            assert blocked == "HOLD"
+        assert strategies.generate_strategy_signal(
+            "TREND_FOLLOWING", df, sentiment=0.0, regime="STRONG_TREND") == "HOLD"
+
+    def test_trend_following_holds_when_trend_has_flattened(self):
+        # Урт өсөлтийн дараа үнэ тэгширсэн: EMA эрэмбэ хэвээр, ADX өндөр хэвээр,
+        # гэвч сүүлийн налуу босгоос доош — идэвхгүй болсон трендэд орохгүй
+        rise = [100.0 + i * 2.0 for i in range(440)]
+        df = make_df(rise + [rise[-1]] * 160)
+
+        assert strategies.generate_strategy_signal(
+            "TREND_FOLLOWING", df, sentiment=0.0, regime="STRONG_TREND") == "HOLD"
+
+    def test_trend_following_ignores_1h_noise_that_would_fire_on_1h(self):
+        # Богино хугацааны огцом үсрэлт 4h макро трендийг өөрчлөхгүй —
+        # 1h дээр ажилладаг байхад ийм шуугиан signal өгч болох байсан
+        flat = [100.0 + (i % 5) * 0.2 for i in range(590)]
+        spike = [flat[-1] + i * 3.0 for i in range(1, 11)]
+        df = make_df(flat + spike)
+        assert strategies.generate_strategy_signal(
+            "TREND_FOLLOWING", df, sentiment=0.0, regime="STRONG_TREND") == "HOLD"
 
     def test_breakout_buy_requires_volume_confirmation(self):
         # Band-аас цуцарсан ч эзлэхүүн энгийн хэвээр байвал HOLD — үүнгүйгээр
@@ -2228,6 +2260,38 @@ class TestMtfScorePenalty:
         patch_setting(monkeypatch, "MTF_ENABLED", False)
 
         assert self._score("NEUTRAL") == pytest.approx(self._score("BULLISH"))
+
+
+class TestResampleOhlcv:
+    def test_aggregates_ohlcv_correctly(self):
+        df = make_df([10.0, 12.0, 8.0, 11.0], volumes=[1.0, 2.0, 3.0, 4.0])
+
+        htf = indicators.resample_ohlcv(df, factor=4)
+
+        assert len(htf) == 1
+        assert htf["open"].iloc[0] == 10.0                  # эхнийх
+        assert htf["close"].iloc[0] == 11.0                 # сүүлийнх
+        assert htf["high"].iloc[0] == pytest.approx(12.0 * 1.01)   # хамгийн өндөр
+        assert htf["low"].iloc[0] == pytest.approx(8.0 * 0.99)     # хамгийн нам
+        assert htf["volume"].iloc[0] == 10.0                # нийлбэр
+
+    def test_trims_from_the_front_so_last_bar_is_included(self):
+        # 10 лаа, factor 4 → 2 бүтэн бүлэг, эхний 2 лаа тайрагдана
+        df = make_df([float(i) for i in range(10)])
+
+        htf = indicators.resample_ohlcv(df, factor=4)
+
+        assert len(htf) == 2
+        assert htf["close"].iloc[-1] == 9.0                 # сүүлийн лаа багтсан
+        assert htf["open"].iloc[0] == 2.0                   # эхний 2 нь тайрагдсан
+
+    def test_returns_none_when_too_short(self):
+        assert indicators.resample_ohlcv(make_df([1.0, 2.0]), factor=4) is None
+
+    def test_bar_count_is_input_divided_by_factor(self):
+        htf = indicators.resample_ohlcv(make_df([float(i) for i in range(600)]), factor=4)
+
+        assert len(htf) == 150
 
 
 class TestFindStrongLevels:

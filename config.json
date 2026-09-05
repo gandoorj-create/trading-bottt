@@ -59,6 +59,13 @@
   "breakout_volume_ratio": 1.5,
   "macd_min_volume_ratio": 1.0,
 
+  "trend_htf_factor": 4,
+  "trend_htf_fast_ema": 20,
+  "trend_htf_mid_ema": 50,
+  "trend_htf_slow_ema": 100,
+  "trend_htf_min_adx": 30,
+  "trend_htf_min_slope": 1.0,
+
   "news_trading": {
     "enabled": false,
     "calendar_url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
