@@ -34,10 +34,17 @@ execute_trades — маржин, minQty, minNotional шалгаад захиал
 
 ### Стратегиуд
 
-`SUPERTREND`, `MACD_MOMENTUM`, `GRID_TRADING`, `BOLLINGER_MEAN_REVERSION`,
+`SUPERTREND`, `MACD_MOMENTUM`, `BREAKOUT`, `BOLLINGER_MEAN_REVERSION`,
 `RSI_STRATEGY`, `TREND_FOLLOWING` — тус бүр өөрийн signal нөхцөл, оноо бодох
 томьёотой. Оноонууд стратеги хооронд ижил масштабгүй тул `min_signal_score`-г
 өөрчлөхдөө болгоомжтой байх (доод хэсгээс үзнэ үү).
+
+`BOLLINGER_MEAN_REVERSION` болон `RSI_STRATEGY` нь band/RSI extreme дээр
+**буцаад ирнэ** гэж бооцоолдог (fade), харин `BREAKOUT` эсрэгээрээ band-аас
+**volume spike-тайгаар** цуцарвал үргэлжлэх гэж бооцоолдог (`breakout_volume_ratio`
+дээш эзлэхүүн шаардана). Хуучин `GRID_TRADING` нь бодит grid логикгүй, зөвхөн
+`BOLLINGER_MEAN_REVERSION`-ий VWAP шалгалтгүй сул хувилбар байсан тул устгаж,
+энэ шинэ, чиглэлээрээ эсрэг стратегиор солив.
 
 ## Эрсдэлийн хамгаалалт
 

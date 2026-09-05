@@ -291,7 +291,7 @@ class TestDetermineRegime:
 
 class TestCalculateStrategyScore:
     @pytest.mark.parametrize("strategy", [
-        "SUPERTREND", "MACD_MOMENTUM", "GRID_TRADING",
+        "SUPERTREND", "MACD_MOMENTUM", "BREAKOUT",
         "BOLLINGER_MEAN_REVERSION", "RSI_STRATEGY", "TREND_FOLLOWING",
     ])
     def test_score_never_negative(self, strategy):
@@ -308,12 +308,21 @@ class TestCalculateStrategyScore:
         range_score = strategies.calculate_strategy_score("SUPERTREND", regime="RANGE", **base_kwargs)
         assert trending_score > range_score
 
-    def test_grid_trading_prefers_range_regime(self):
-        base_kwargs = dict(adx=10, rsi=50, atr_pct=1.0, volume_ratio=1.0,
-                            ema_slope=0.0, sentiment=0.0, chop=70, mtf_signal="NEUTRAL")
-        range_score = strategies.calculate_strategy_score("GRID_TRADING", regime="RANGE", **base_kwargs)
-        trending_score = strategies.calculate_strategy_score("GRID_TRADING", regime="TRENDING", **base_kwargs)
-        assert range_score > trending_score
+    def test_breakout_prefers_volatile_regime_over_calm_range(self):
+        # Тайван RANGE дотор гарсан band-ын статистик савалгаа ихэвчлэн
+        # хуурамч байдаг тул VOLATILE_RANGE/TRANSITION-ыг илүү өндөр үнэлнэ
+        base_kwargs = dict(adx=20, rsi=50, atr_pct=1.0, volume_ratio=2.0,
+                            ema_slope=0.0, sentiment=0.0, chop=50, mtf_signal="NEUTRAL")
+        volatile_score = strategies.calculate_strategy_score("BREAKOUT", regime="VOLATILE_RANGE", **base_kwargs)
+        range_score = strategies.calculate_strategy_score("BREAKOUT", regime="RANGE", **base_kwargs)
+        assert volatile_score > range_score
+
+    def test_breakout_score_scales_with_volume(self):
+        base_kwargs = dict(adx=20, rsi=50, atr_pct=1.0, ema_slope=0.0,
+                            sentiment=0.0, regime="VOLATILE_RANGE", chop=50, mtf_signal="NEUTRAL")
+        low_volume = strategies.calculate_strategy_score("BREAKOUT", volume_ratio=1.0, **base_kwargs)
+        high_volume = strategies.calculate_strategy_score("BREAKOUT", volume_ratio=4.0, **base_kwargs)
+        assert high_volume > low_volume
 
     def test_neutral_mtf_penalises_trend_strategies(self):
         base_kwargs = dict(adx=35, rsi=55, atr_pct=1.0, volume_ratio=2.0,
@@ -361,9 +370,28 @@ class TestGenerateStrategySignal:
         if buy == "BUY":
             assert blocked == "HOLD"
 
-    def test_grid_trading_only_trades_in_range_regime(self):
-        df = noisy_uptrend_df()
-        assert strategies.generate_strategy_signal("GRID_TRADING", df, sentiment=0.0, regime="STRONG_TREND") == "HOLD"
+    def test_breakout_buy_requires_volume_confirmation(self):
+        # Band-аас цуцарсан ч эзлэхүүн энгийн хэвээр байвал HOLD — үүнгүйгээр
+        # хуурамч (noise) хөдөлгөөнийг signal болгож болохгүй
+        base = [100.0 + (i % 2) * 0.1 for i in range(40)]
+        df = make_df(base[:-1] + [112.0], volumes=[100.0] * 40)
+        assert strategies.generate_strategy_signal("BREAKOUT", df, sentiment=0.0, regime="VOLATILE_RANGE") == "HOLD"
+
+    def test_breakout_buy_with_volume_spike(self):
+        base = [100.0 + (i % 2) * 0.1 for i in range(40)]
+        df = make_df(base[:-1] + [112.0], volumes=[100.0] * 39 + [400.0])
+        assert strategies.generate_strategy_signal("BREAKOUT", df, sentiment=0.0, regime="VOLATILE_RANGE") == "BUY"
+
+    def test_breakout_sell_with_volume_spike(self):
+        base = [100.0 + (i % 2) * 0.1 for i in range(40)]
+        df = make_df(base[:-1] + [89.0], volumes=[100.0] * 39 + [400.0])
+        assert strategies.generate_strategy_signal("BREAKOUT", df, sentiment=0.0, regime="VOLATILE_RANGE") == "SELL"
+
+    def test_breakout_holds_when_price_stays_inside_bands(self):
+        # Volume spike ирсэн ч үнэ band дотор хэвээр бол breakout биш
+        base = [100.0 + (i % 2) * 0.1 for i in range(40)]
+        df = make_df(base, volumes=[100.0] * 39 + [400.0])
+        assert strategies.generate_strategy_signal("BREAKOUT", df, sentiment=0.0, regime="VOLATILE_RANGE") == "HOLD"
 
     def test_bollinger_mean_reversion_holds_in_trend_regime(self):
         df = noisy_uptrend_df()

@@ -92,7 +92,7 @@ def main():
             "SMART BOT V2 АСЛАА! (ШИНЭ ҮЗҮҮЛЭЛТҮҮД)",
             "🤖",
             [
-                ("Strategies", "6 (SUPERTREND, MACD, GRID, BOLLINGER, RSI, TREND)"),
+                ("Strategies", "6 (SUPERTREND, MACD, BREAKOUT, BOLLINGER, RSI, TREND)"),
                 ("Regime", "CHOP Index (38.2/61.8)"),
                 ("Trend Signal", "Supertrend (EMA-г орлосон)"),
                 ("Filters", "MTF (4h/1h) + VWAP + Funding Rate"),
@@ -112,8 +112,6 @@ def main():
             log.info("\n🧪 Running initial backtest for all strategies...")
             test_symbols = SYMBOLS_POOL[:2]
             for strategy in STRATEGY_NAMES:
-                if strategy == "GRID_TRADING":
-                    continue
                 for symbol in test_symbols:
                     report = backtest.run_backtest(symbol, strategy, days=BACKTEST_DAYS, interval=BACKTEST_INTERVAL)
                     if report and "error" not in report.lower() and "хангалттай" not in report:

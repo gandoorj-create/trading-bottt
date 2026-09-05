@@ -97,9 +97,16 @@ def generate_strategy_signal(strategy, df, sentiment, regime, chop=None):
         if histogram.iloc[-1] > 0 and histogram.iloc[-1] > histogram.iloc[-2] and rsi < 70: return "BUY"
         if histogram.iloc[-1] < 0 and histogram.iloc[-1] < histogram.iloc[-2] and rsi > 30: return "SELL"
 
-    elif strategy == "GRID_TRADING":
-        if regime in ["RANGE", "VOLATILE_RANGE"] and close <= lower.iloc[-1] and rsi < 40: return "BUY"
-        if regime in ["RANGE", "VOLATILE_RANGE"] and close >= upper.iloc[-1] and rsi > 60: return "SELL"
+    elif strategy == "BREAKOUT":
+        # Bollinger band-аас volume spike-тайгаар цуцарвал continuation гэж
+        # үзнэ (fade биш) — өмнөх стратегиуд бүгд extreme дээр буцаад ирнэ гэж
+        # бооцоолдог байсан тул range эвдэрч байгаа мөчид ямар ч стратеги
+        # ажилладаггүй байв. Volume баталгаагүй хөдөлгөөнийг signal болгохгүй.
+        volume_ratio = indicators.calculate_volume_ratio(df)
+        if close > upper.iloc[-1] and volume_ratio >= BREAKOUT_VOLUME_RATIO and sentiment >= -0.4:
+            return "BUY"
+        if close < lower.iloc[-1] and volume_ratio >= BREAKOUT_VOLUME_RATIO and sentiment <= 0.4:
+            return "SELL"
 
     elif strategy == "BOLLINGER_MEAN_REVERSION":
         if regime in ["RANGE", "VOLATILE_RANGE"]:
@@ -146,9 +153,14 @@ def calculate_strategy_score(strategy, adx, rsi, atr_pct, volume_ratio, ema_slop
         score += max(0, 35 - abs(rsi - 50)) * 0.15 + min(adx, 35) * 0.25 + min(atr_pct, 5) * 2 + min(volume_ratio, 3)
         score += mtf_penalty * 0.5
 
-    elif strategy == "GRID_TRADING":
-        if regime in ["RANGE", "VOLATILE_RANGE"]: score += 8
-        score += max(0, 25 - adx) * 0.4 + atr_pct * 3 + chop_score
+    elif strategy == "BREAKOUT":
+        # Volume нь энэ стратегийн цөм баталгаа тул хамгийн их жинтэй.
+        # Тайван RANGE дотор гарсан breakout нь ихэвчлэн хуурамч (band-ын
+        # статистик савалгаа) тул VOLATILE_RANGE/TRANSITION-ыг илүү өндөр үнэлнэ.
+        if regime in ["VOLATILE_RANGE", "TRANSITION"]: score += 8
+        elif regime in ["TRENDING", "STRONG_TREND"]: score += 4
+        score += min(volume_ratio, 5) * 3 + atr_pct * 2 + min(adx, 40) * 0.2
+        score += mtf_penalty * 0.5
 
     elif strategy == "BOLLINGER_MEAN_REVERSION":
         if regime in ["RANGE", "VOLATILE_RANGE"]: score += 7
