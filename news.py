@@ -18,26 +18,51 @@ from logging_setup import get_logger
 log = get_logger(__name__)
 
 
-def get_next_cpi_event():
+def get_next_news_event():
+    """Хамгийн ойрын ирээдүйн өндөр нөлөөтэй USD эвентийн UTC цаг.
+
+    Календарийн JSON нь цагийн дарааллаар эрэмбэлэгдсэн гэсэн баталгаа байхгүй
+    тул анхны таарсныг биш, ИРЭЭДҮЙН таарсан бүхнээс хамгийн эртнийг сонгоно —
+    эс тэгвээс 2 хоногийн дараах эвент рүү тэмүүлж, маргаашийнхыг өнгөрөөнө.
+    """
     if not NEWS_CALENDAR_URL:
         return None
     try:
         resp = requests.get(NEWS_CALENDAR_URL, timeout=10)
         data = resp.json()
-        now = datetime.now(pytz.UTC)
-        ny_tz = pytz.timezone('America/New_York')
-        for item in data:
-            if "CPI" in item.get("title", "") and "USD" in item.get("country", ""):
-                raw_dt = datetime.fromisoformat(item["date"])
-                # pytz needs localize(); .replace(tzinfo=) yields a wrong LMT offset.
-                if raw_dt.tzinfo is None:
-                    raw_dt = ny_tz.localize(raw_dt)
-                event_time_utc = raw_dt.astimezone(pytz.UTC)
-                if event_time_utc > now:
-                    return event_time_utc
     except Exception as e:
         log.warning(f"⚠️ News calendar error: {e}")
-    return None
+        return None
+
+    if not isinstance(data, list):
+        log.warning("⚠️ News calendar: хүлээгдэж буй жагсаалт ирсэнгүй")
+        return None
+
+    now = datetime.now(pytz.UTC)
+    ny_tz = pytz.timezone('America/New_York')
+    upcoming = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title", "")
+        if "USD" not in item.get("country", ""):
+            continue
+        if not any(keyword.upper() in title.upper() for keyword in NEWS_EVENT_KEYWORDS):
+            continue
+        try:
+            raw_dt = datetime.fromisoformat(item["date"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # pytz needs localize(); .replace(tzinfo=) yields a wrong LMT offset.
+        if raw_dt.tzinfo is None:
+            raw_dt = ny_tz.localize(raw_dt)
+        event_time_utc = raw_dt.astimezone(pytz.UTC)
+        if event_time_utc > now:
+            upcoming.append(event_time_utc)
+
+    if not upcoming:
+        return None
+    return min(upcoming)
 
 
 def check_news_status():
@@ -51,7 +76,7 @@ def check_news_status():
     now = datetime.now(pytz.UTC)
     stale = (not isinstance(state.last_news_check, datetime)) or (now - state.last_news_check).total_seconds() > 3600
     if not state.next_news_time or stale:
-        state.next_news_time = get_next_cpi_event()
+        state.next_news_time = get_next_news_event()
         state.last_news_check = now
 
     if not state.next_news_time:
@@ -71,8 +96,14 @@ def check_news_status():
         return
 
     if diff <= -NEWS_WAIT_AFTER and state.news_mode_active and not state.news_trade_done:
-        log.info("📰 News cooldown finished. Executing post-news trade...")
-        execute_post_news_trade()
+        # Зогсоолт ба дараах арилжаа тусдаа флагтай: зогсоолт нь эвентийн spike
+        # дээр stop цохиулахаас хамгаалдаг тул дангаараа утгатай, харин
+        # хөдөлгөөний араас үсрэх нь батлагдаагүй тул сонголт хэвээр.
+        if NEWS_POST_TRADE_ENABLED:
+            log.info("📰 News cooldown finished. Executing post-news trade...")
+            execute_post_news_trade()
+        else:
+            log.info("📰 News cooldown finished — post-news арилжаа унтраалттай, техник арилжаа үргэлжилнэ.")
         state.news_trade_done = True
         state.news_mode_active = False
         return
@@ -83,6 +114,8 @@ def check_news_status():
 
 
 def execute_post_news_trade():
+    if not NEWS_POST_TRADE_ENABLED:
+        return
     if state.news_trade_done:
         return
 

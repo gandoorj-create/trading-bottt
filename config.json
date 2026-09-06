@@ -18,6 +18,11 @@
   "take_profit_pct": 4.5,
   "emergency_sl_pct": 3.0,
 
+  "partial_tp_enabled": true,
+  "partial_tp_pct": 2.0,
+  "partial_tp_ratio": 0.5,
+  "breakeven_offset_pct": 0.1,
+
   "target_profit_usdt": 300.0,
   "target_cooldown_sec": 600,
 
@@ -67,7 +72,9 @@
   "trend_htf_min_slope": 1.0,
 
   "news_trading": {
-    "enabled": false,
+    "enabled": true,
+    "post_news_trade": false,
+    "event_keywords": ["CPI", "FOMC"],
     "calendar_url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
     "pause_before_minutes": 30,
     "wait_after_minutes": 15,

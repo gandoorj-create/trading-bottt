@@ -9,10 +9,12 @@ global state-ийг тест бүрийн өмнө цэвэрлэдэг.
     pip install -r requirements-dev.txt
     pytest -v
 """
+from datetime import datetime, timedelta
 import json
 
 import pandas as pd
 import pytest
+import pytz
 
 import time
 
@@ -21,6 +23,7 @@ import binance_client
 import execution
 import indicators
 import market_data
+import news
 import order_api
 import persistence
 import position_manager
@@ -873,6 +876,10 @@ def order_spy(monkeypatch):
 
     monkeypatch.setattr(order_api, "place_market_order", fake_order)
     monkeypatch.setattr(order_api, "cancel_all_symbol_orders", lambda symbol: None)
+    # Хэсэгчилсэн TP нь conditional захиалга — market захиалгын жагсаалтад
+    # орохгүй, гэхдээ сүлжээ рүү ч гарахгүй байх ёстой.
+    monkeypatch.setattr(order_api, "place_partial_take_profit_order",
+                        lambda symbol, side, quantity, tp_price, position_side=None: {"orderId": 1})
     monkeypatch.setattr(account, "ensure_leverage", lambda symbol, leverage=None: True)
     monkeypatch.setattr(account, "get_actual_leverage", lambda symbol: 5)
     return orders
@@ -898,7 +905,7 @@ def tradeable(monkeypatch, order_spy, fake_symbol_info):
     monkeypatch.setattr(account, "get_position_mode", lambda: False)
     monkeypatch.setattr(binance_client, "current_timestamp_ms", lambda: 1_700_000_000_000)
     monkeypatch.setattr(position_manager, "rebuild_protection_orders",
-                        lambda symbol, side, qty, entry, pos_side: (True, 103.0, 101.0))
+                        lambda symbol, side, qty, entry, pos_side, **kw: (True, 103.0, 101.0))
     monkeypatch.setattr(time, "sleep", lambda seconds: None)
     return order_spy
 
@@ -935,7 +942,7 @@ class TestExecuteTradesHappyPath:
 
     def test_failed_protection_closes_position_immediately(self, monkeypatch, tradeable, telegram_messages):
         monkeypatch.setattr(position_manager, "rebuild_protection_orders",
-                            lambda symbol, side, qty, entry, pos_side: (False, None, None))
+                            lambda symbol, side, qty, entry, pos_side, **kw: (False, None, None))
         monkeypatch.setattr(account, "get_trade_realized_pnl", lambda symbol, opened_at_ms: -1.5)
 
         execution.execute_trades([_coin()], total_balance=1000.0)
@@ -1598,7 +1605,7 @@ class TestOrderPathSurvivesApiFailure:
         monkeypatch.setattr(account, "get_position_mode", lambda: False)
         monkeypatch.setattr(binance_client, "current_timestamp_ms", lambda: 1_700_000_000_000)
         monkeypatch.setattr(position_manager, "rebuild_protection_orders",
-                            lambda symbol, side, qty, entry, pos_side:
+                            lambda symbol, side, qty, entry, pos_side, **kw:
                                 protections.append(symbol) or (True, 103.0, 101.0))
         monkeypatch.setattr(time, "sleep", lambda seconds: None)
         # Захиалгын өмнөх уншилт OK, захиалгын дараах уншилт алдаатай
@@ -1667,7 +1674,7 @@ class TestStrategyRestoreAcrossRestart:
         monkeypatch.setattr(account, "get_positions", lambda: [_position(symbol, amt=amt)])
         monkeypatch.setattr(binance_client, "send_signed_request", lambda *a, **kw: [])
         monkeypatch.setattr(position_manager, "rebuild_protection_orders",
-                            lambda symbol, side, qty, entry, pos_side: (True, 103.0, 101.0))
+                            lambda symbol, side, qty, entry, pos_side, **kw: (True, 103.0, 101.0))
 
     def test_saved_trade_is_written_to_disk(self):
         bot_state.active_trade_info["BTCUSDT"] = _trade_info(strategy="MACD_MOMENTUM")
@@ -1956,7 +1963,7 @@ class TestProtectionDetectionOnRecovery:
         monkeypatch.setattr(binance_client, "send_signed_request",
                             lambda m, e, p=None, **kw: algo_response(m, e))
         monkeypatch.setattr(position_manager, "rebuild_protection_orders",
-                            lambda symbol, side, qty, entry, pos_side:
+                            lambda symbol, side, qty, entry, pos_side, **kw:
                                 rebuilt.append(symbol) or (True, 103.0, 101.0))
         position_manager.sync_existing_positions()
         return rebuilt
@@ -2319,3 +2326,364 @@ class TestFindStrongLevels:
 
     def test_empty_frame_returns_none(self):
         assert market_data.find_strong_levels(make_df([])) == (None, None)
+
+
+# ----------------------------------------------------------------
+# Хэсэгчилсэн take-profit (scale-out) ба breakeven stop
+#
+# Өмнө нь гарц ганц байсан: 4.5% TP эсвэл 3% SL. "+2% хүрээд буцаж SL цохисон"
+# арилжаа бүтэн алдагдал болдог байв. Одоо позицын хагасыг 2% дээр тасалж
+# аваад, үлдсэн хэсгийн stop-ыг breakeven руу зөөнө.
+# ----------------------------------------------------------------
+
+@pytest.fixture
+def partial_tp_spy(monkeypatch, fake_symbol_info):
+    """Хэсэгчилсэн TP-ийн conditional захиалгыг барьж аваад бүртгэнэ."""
+    placed = []
+
+    def fake(symbol, side, quantity, tp_price, position_side=None):
+        placed.append({"symbol": symbol, "side": side, "quantity": quantity,
+                       "tp_price": tp_price, "position_side": position_side})
+        return {"orderId": 7}
+
+    monkeypatch.setattr(order_api, "place_partial_take_profit_order", fake)
+    monkeypatch.setattr(account, "get_position_mode", lambda: False)
+    patch_setting(monkeypatch, "PARTIAL_TP_ENABLED", True)
+    patch_setting(monkeypatch, "PARTIAL_TP_PCT", 2.0)
+    patch_setting(monkeypatch, "PARTIAL_TP_RATIO", 0.5)
+    return placed
+
+
+class TestPlacePartialTakeProfit:
+    def test_half_the_position_is_sold_at_the_configured_profit(self, partial_tp_spy):
+        price = position_manager.place_partial_tp("BTCUSDT", "BUY", 4.0, 100.0, "BOTH")
+
+        assert price == pytest.approx(102.0)
+        assert len(partial_tp_spy) == 1
+        assert partial_tp_spy[0]["quantity"] == pytest.approx(2.0)
+        assert partial_tp_spy[0]["side"] == "SELL"
+        assert partial_tp_spy[0]["tp_price"] == pytest.approx(102.0)
+
+    def test_short_takes_profit_below_entry(self, partial_tp_spy):
+        price = position_manager.place_partial_tp("BTCUSDT", "SELL", 4.0, 100.0, "BOTH")
+
+        assert price == pytest.approx(98.0)
+        assert partial_tp_spy[0]["side"] == "BUY"
+
+    def test_ratio_controls_how_much_is_taken(self, monkeypatch, partial_tp_spy):
+        patch_setting(monkeypatch, "PARTIAL_TP_RATIO", 0.25)
+
+        position_manager.place_partial_tp("BTCUSDT", "BUY", 4.0, 100.0, "BOTH")
+
+        assert partial_tp_spy[0]["quantity"] == pytest.approx(1.0)
+
+    def test_disabled_places_no_order(self, monkeypatch, partial_tp_spy):
+        patch_setting(monkeypatch, "PARTIAL_TP_ENABLED", False)
+
+        assert position_manager.place_partial_tp("BTCUSDT", "BUY", 4.0, 100.0, "BOTH") is None
+        assert partial_tp_spy == []
+
+    def test_too_small_a_slice_is_skipped_not_rejected_by_exchange(self, partial_tp_spy):
+        # BTCUSDT minNotional = 100. Хагас нь 0.5 * 102 = $51 → биржид татгалзагдана.
+        assert position_manager.place_partial_tp("BTCUSDT", "BUY", 1.0, 100.0, "BOTH") is None
+        assert partial_tp_spy == []
+
+    def test_api_error_returns_none_so_no_phantom_partial_is_tracked(self, monkeypatch, partial_tp_spy):
+        monkeypatch.setattr(order_api, "place_partial_take_profit_order",
+                            lambda *a, **kw: {"code": -2021, "msg": "would immediately trigger"})
+
+        assert position_manager.place_partial_tp("BTCUSDT", "BUY", 4.0, 100.0, "BOTH") is None
+
+
+@pytest.fixture
+def breakeven_env(monkeypatch):
+    """rebuild_protection_orders-ийг барьж, ямар stop-той дуудагдсаныг бүртгэнэ."""
+    rebuilds = []
+
+    def fake_rebuild(symbol, side, qty, entry, pos_side, stop_price=None):
+        rebuilds.append({"symbol": symbol, "side": side, "qty": qty,
+                         "entry": entry, "stop_price": stop_price})
+        return True, 104.5, 103.0
+
+    monkeypatch.setattr(position_manager, "rebuild_protection_orders", fake_rebuild)
+    monkeypatch.setattr(market_data, "round_price", lambda symbol, price: round(price, 4))
+    patch_setting(monkeypatch, "PARTIAL_TP_ENABLED", True)
+    patch_setting(monkeypatch, "PARTIAL_TP_RATIO", 0.5)
+    patch_setting(monkeypatch, "PARTIAL_TP_PCT", 2.0)
+    patch_setting(monkeypatch, "BREAKEVEN_OFFSET_PCT", 0.1)
+    return rebuilds
+
+
+def _partially_filled_trade(side="BUY", quantity=4.0):
+    trade = _trade_info(side=side)
+    trade["quantity"] = quantity
+    trade["partial_tp_price"] = 102.0 if side == "BUY" else 98.0
+    trade["breakeven_done"] = False
+    return trade
+
+
+class TestBreakevenAfterPartialFill:
+    def test_halved_position_moves_stop_to_breakeven(self, breakeven_env):
+        bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade()
+
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=2.0)])
+
+        assert len(breakeven_env) == 1
+        # entry 100 + 0.1% шимтгэлийн зай
+        assert breakeven_env[0]["stop_price"] == pytest.approx(100.1)
+        assert breakeven_env[0]["qty"] == pytest.approx(2.0)
+
+    def test_short_breakeven_stop_sits_below_entry(self, breakeven_env):
+        bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade(side="SELL")
+
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=-2.0)])
+
+        assert breakeven_env[0]["stop_price"] == pytest.approx(99.9)
+
+    def test_tracked_quantity_follows_the_remaining_position(self, breakeven_env):
+        bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade()
+
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=2.0)])
+
+        assert bot_state.active_trade_info["BTCUSDT"]["quantity"] == pytest.approx(2.0)
+        assert bot_state.active_trade_info["BTCUSDT"]["breakeven_done"] is True
+
+    def test_intact_position_keeps_its_original_stop(self, breakeven_env):
+        bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade()
+
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=4.0)])
+
+        assert breakeven_env == []
+
+    def test_breakeven_is_not_repeated_on_later_cycles(self, breakeven_env):
+        # Хоёр дахь удаа позиц ЦААШ багассан ч (гараар хэсэгчлэн хаасан,
+        # эсвэл хоёр хэсгээр биелсэн) breakeven-ийг дахин барихгүй — эс тэгвээс
+        # мөчлөг тутамд бүх хамгаалалтаа цуцлаад дахин барих эрсдэлтэй.
+        bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade()
+
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=2.0)])
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=1.0)])
+
+        assert len(breakeven_env) == 1
+
+    def test_position_without_a_partial_tp_is_left_alone(self, breakeven_env):
+        # Partial TP байрлаагүй (API алдаа) байхад хэмжээ буурсан бол энэ нь
+        # гараар хаасан гэсэн үг — түүнийг "TP биеллээ" гэж андуурч болохгүй.
+        trade = _partially_filled_trade()
+        trade["partial_tp_price"] = None
+        bot_state.active_trade_info["BTCUSDT"] = trade
+
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=2.0)])
+
+        assert breakeven_env == []
+
+    def test_failed_rebuild_is_retried_and_flagged_unprotected(self, monkeypatch, breakeven_env, telegram_messages):
+        monkeypatch.setattr(position_manager, "rebuild_protection_orders",
+                            lambda symbol, side, qty, entry, pos_side, stop_price=None: (False, None, None))
+        bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade()
+
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=2.0)])
+
+        trade = bot_state.active_trade_info["BTCUSDT"]
+        assert trade["breakeven_done"] is False       # дараагийн мөчлөгт дахин оролдоно
+        assert trade["quantity"] == pytest.approx(4.0)
+        assert "BTCUSDT" in bot_state.unprotected_symbols
+        assert any("BREAKEVEN" in m for m in telegram_messages)
+
+    def test_disabled_feature_never_moves_the_stop(self, monkeypatch, breakeven_env):
+        patch_setting(monkeypatch, "PARTIAL_TP_ENABLED", False)
+        bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade()
+
+        position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=2.0)])
+
+        assert breakeven_env == []
+
+    def test_monitor_positions_performs_the_breakeven_move(self, monkeypatch, breakeven_env, monitor_env):
+        monkeypatch.setattr(account, "get_positions", lambda: [_position("BTCUSDT", amt=2.0)])
+        bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade()
+
+        position_manager.monitor_positions()
+
+        assert len(breakeven_env) == 1
+
+
+# ----------------------------------------------------------------
+# Мэдээний цагийн хуваарь
+#
+# Эвентийн өмнөх түр зогсоолт ба эвентийн дараах арилжаа хоёр тусдаа флагтай:
+# зогсоолт нь spike дээр stop цохиулахаас хамгаалдаг тул дангаараа утгатай.
+# ----------------------------------------------------------------
+
+@pytest.fixture
+def news_env(monkeypatch):
+    patch_setting(monkeypatch, "NEWS_ENABLED", True)
+    patch_setting(monkeypatch, "NEWS_PAUSE_BEFORE", 30)
+    patch_setting(monkeypatch, "NEWS_WAIT_AFTER", 15)
+    bot_state.last_news_check = datetime.now(pytz.UTC)
+
+
+def _event_in(minutes):
+    return datetime.now(pytz.UTC) + timedelta(minutes=minutes)
+
+
+class TestNewsPauseWindow:
+    def test_new_technical_trades_pause_before_the_event(self, news_env):
+        bot_state.next_news_time = _event_in(10)
+
+        news.check_news_status()
+
+        assert bot_state.news_mode_active is True
+
+    def test_no_pause_while_the_event_is_still_far_away(self, news_env):
+        bot_state.next_news_time = _event_in(120)
+
+        news.check_news_status()
+
+        assert bot_state.news_mode_active is False
+
+    def test_pause_holds_through_the_settling_window(self, news_env):
+        bot_state.next_news_time = _event_in(-5)
+
+        news.check_news_status()
+
+        assert bot_state.news_mode_active is True
+
+    def test_disabled_module_never_pauses(self, monkeypatch, news_env):
+        patch_setting(monkeypatch, "NEWS_ENABLED", False)
+        bot_state.next_news_time = _event_in(10)
+
+        news.check_news_status()
+
+        assert bot_state.news_mode_active is False
+
+
+class TestPostNewsTradeIsOptional:
+    def _run_cooldown_end(self, monkeypatch):
+        traded = []
+        monkeypatch.setattr(news, "execute_post_news_trade", lambda: traded.append(1))
+        bot_state.next_news_time = _event_in(-20)
+        bot_state.news_mode_active = True
+        bot_state.news_trade_done = False
+        news.check_news_status()
+        return traded
+
+    def test_trade_is_skipped_when_only_the_pause_is_enabled(self, monkeypatch, news_env):
+        patch_setting(monkeypatch, "NEWS_POST_TRADE_ENABLED", False)
+
+        traded = self._run_cooldown_end(monkeypatch)
+
+        assert traded == []
+        assert bot_state.news_mode_active is False   # техник арилжаа үргэлжилнэ
+
+    def test_trade_runs_when_explicitly_enabled(self, monkeypatch, news_env):
+        patch_setting(monkeypatch, "NEWS_POST_TRADE_ENABLED", True)
+
+        assert self._run_cooldown_end(monkeypatch) == [1]
+
+    def test_execute_itself_refuses_when_disabled(self, monkeypatch, news_env):
+        patch_setting(monkeypatch, "NEWS_POST_TRADE_ENABLED", False)
+        monkeypatch.setattr(market_data, "get_klines",
+                            lambda *a, **kw: pytest.fail("арилжаа хийх ёсгүй"))
+
+        news.execute_post_news_trade()
+
+
+class TestNewsCalendarParsing:
+    def _calendar(self, monkeypatch, items):
+        class FakeRequests:
+            @staticmethod
+            def get(url, timeout=None):
+                class R:
+                    @staticmethod
+                    def json():
+                        return items
+                return R()
+
+        monkeypatch.setattr(news, "requests", FakeRequests)
+        patch_setting(monkeypatch, "NEWS_CALENDAR_URL", "https://example.invalid/cal.json")
+        patch_setting(monkeypatch, "NEWS_EVENT_KEYWORDS", ["CPI", "FOMC"])
+        return news.get_next_news_event()
+
+    def _item(self, title, minutes, country="USD"):
+        return {"title": title, "country": country,
+                "date": _event_in(minutes).isoformat()}
+
+    def test_earliest_upcoming_event_wins_regardless_of_file_order(self, monkeypatch):
+        result = self._calendar(monkeypatch, [
+            self._item("CPI m/m", 3000),
+            self._item("FOMC Statement", 120),
+        ])
+
+        assert (result - datetime.now(pytz.UTC)).total_seconds() / 60 == pytest.approx(120, abs=1)
+
+    def test_past_events_are_ignored(self, monkeypatch):
+        result = self._calendar(monkeypatch, [
+            self._item("CPI m/m", -60),
+            self._item("FOMC Statement", 200),
+        ])
+
+        assert (result - datetime.now(pytz.UTC)).total_seconds() / 60 == pytest.approx(200, abs=1)
+
+    def test_unrelated_titles_are_filtered_out(self, monkeypatch):
+        assert self._calendar(monkeypatch, [self._item("Flash Manufacturing PMI", 60)]) is None
+
+    def test_non_usd_events_are_filtered_out(self, monkeypatch):
+        assert self._calendar(monkeypatch, [self._item("CPI y/y", 60, country="EUR")]) is None
+
+    def test_malformed_rows_do_not_break_the_lookup(self, monkeypatch):
+        result = self._calendar(monkeypatch, [
+            "мөр биш",
+            {"title": "CPI m/m", "country": "USD", "date": "огт огноо биш"},
+            self._item("CPI m/m", 90),
+        ])
+
+        assert (result - datetime.now(pytz.UTC)).total_seconds() / 60 == pytest.approx(90, abs=1)
+
+
+class TestRebuildProtectionStopLevel:
+    """rebuild_protection_orders нь stop-ыг хаанаас авч байгаа вэ.
+
+    breakeven зөөлт бүхэлдээ энэ параметр дээр тогтдог тул мок биш, жинхэнэ
+    функцээр нь шалгана.
+    """
+
+    @pytest.fixture
+    def protection_spy(self, monkeypatch, fake_symbol_info):
+        placed = {}
+        monkeypatch.setattr(order_api, "cancel_all_symbol_orders", lambda symbol: {"algo": []})
+        monkeypatch.setattr(order_api, "place_stop_loss_order",
+                            lambda symbol, side, qty, stop_price, position_side=None:
+                                placed.__setitem__("sl", stop_price) or {"orderId": 1})
+        monkeypatch.setattr(order_api, "place_take_profit_order",
+                            lambda symbol, side, qty, tp_price, position_side=None:
+                                placed.__setitem__("tp", tp_price) or {"orderId": 2})
+        monkeypatch.setattr(order_api, "place_trailing_stop_order", lambda *a, **kw: {"orderId": 3})
+        monkeypatch.setattr(position_manager, "calculate_trailing_activation",
+                            lambda symbol, side, entry: 103.0)
+        return placed
+
+    def test_default_stop_is_the_emergency_level(self, monkeypatch, protection_spy):
+        patch_setting(monkeypatch, "EMERGENCY_SL_PCT", 3.0)
+
+        position_manager.rebuild_protection_orders("BTCUSDT", "BUY", 4.0, 100.0, "BOTH")
+
+        assert protection_spy["sl"] == pytest.approx(97.0)
+
+    def test_explicit_stop_price_overrides_the_emergency_level(self, protection_spy):
+        position_manager.rebuild_protection_orders("BTCUSDT", "BUY", 4.0, 100.0, "BOTH", stop_price=100.1)
+
+        assert protection_spy["sl"] == pytest.approx(100.1)
+
+    def test_take_profit_target_is_untouched_by_the_stop_override(self, monkeypatch, protection_spy):
+        patch_setting(monkeypatch, "TAKE_PROFIT_PCT", 4.5)
+
+        position_manager.rebuild_protection_orders("BTCUSDT", "BUY", 4.0, 100.0, "BOTH", stop_price=100.1)
+
+        assert protection_spy["tp"] == pytest.approx(104.5)
+
+    def test_short_default_stop_sits_above_entry(self, monkeypatch, protection_spy):
+        patch_setting(monkeypatch, "EMERGENCY_SL_PCT", 3.0)
+
+        position_manager.rebuild_protection_orders("BTCUSDT", "SELL", 4.0, 100.0, "BOTH")
+
+        assert protection_spy["sl"] == pytest.approx(103.0)

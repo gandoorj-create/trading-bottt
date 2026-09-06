@@ -155,6 +155,12 @@ def execute_trades(selected_coins, total_balance):
             notifications.send_telegram(format_block("EMERGENCY CLOSED", "⚠️", [("Symbol", symbol), ("PnL", money(pnl))]))
             continue
 
+        # Хэсэгчилсэн TP-г заавал хамгаалалт барьсны ДАРАА — rebuild нь эхлээд
+        # symbol дээрх бүх conditional захиалгыг цуцалдаг.
+        partial_tp_price = position_manager.place_partial_tp(
+            symbol, signal, actual_quantity, entry_price, actual_position_side
+        )
+
         state.active_trade_info[symbol] = {
             "strategy": strategy,
             "side": signal,
@@ -166,6 +172,8 @@ def execute_trades(selected_coins, total_balance):
             "entry_order_id": order.get("orderId"),
             "sl_order_id": None,
             "tp_order_id": None,
+            "partial_tp_price": partial_tp_price,
+            "breakeven_done": False,
             "recovered": False
         }
         # Шинэ позицын стратегийг тэр дороо дискэнд бичнэ — үүний дараа шууд
@@ -188,6 +196,7 @@ def execute_trades(selected_coins, total_balance):
                     ("Margin", f"${margin:.2f} ({LEVERAGE}x)"),
                     ("", ""),
                     ("Take Profit", f"${tp_price:,.6f}"),
+                    ("Partial TP", f"{PARTIAL_TP_RATIO * 100:.0f}% @ ${partial_tp_price:,.6f} → stop breakeven" if partial_tp_price else "off"),
                     ("Trailing", f"{TRAILING_CALLBACK_RATE}% @ ${activation_price:,.6f}" if activation_price else "not set — emergency SL active"),
                     ("", ""),
                     ("Score", f"{coin['score']:.2f}"),

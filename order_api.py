@@ -102,6 +102,30 @@ def place_take_profit_order(symbol, side, quantity, tp_price, position_side=None
     return place_conditional_order(params)
 
 
+def place_partial_take_profit_order(symbol, side, quantity, tp_price, position_side=None):
+    """Позицын зөвхөн ХЭСГИЙГ хаах take-profit.
+
+    place_take_profit_order-оос ялгаатай нь closePosition=true биш, харин
+    тодорхой quantity-тэй reduceOnly захиалга. Ингэснээр trigger хүрэхэд
+    позиц бүрэн хаагдахгүй, үлдсэн хэсэг нь трендээ дагаж явсаар байна.
+    """
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "TAKE_PROFIT_MARKET",
+        "triggerPrice": market_data.format_price(symbol, tp_price),
+        "quantity": market_data.format_qty(symbol, quantity),
+        "workingType": "MARK_PRICE",
+        "newOrderRespType": "RESULT"
+    }
+    if account.get_position_mode():
+        if position_side:
+            params["positionSide"] = position_side
+    else:
+        params["reduceOnly"] = "true"
+    return place_conditional_order(params)
+
+
 def cancel_all_orders(symbol):
     return binance_client.send_signed_request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
 

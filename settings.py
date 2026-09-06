@@ -47,6 +47,18 @@ TRAILING_ACTIVATION_PCT = _cfg["trailing_activation_pct"]
 TAKE_PROFIT_PCT = _cfg["take_profit_pct"]
 EMERGENCY_SL_PCT = _cfg["emergency_sl_pct"]
 
+# ---- Хэсэгчилсэн take-profit (scale-out) ----
+# Позицын нэг хэсгийг эрт (PARTIAL_TP_PCT дээр) тасалж аваад, үлдсэн хэсгийн
+# stop-ыг breakeven руу зөөнө. Ингэснээр "+2% хүрээд буцаж SL цохисон" арилжаа
+# бүтэн алдагдал байхаа болиод бага зэрэг ашигтай хаагдана. Хариуд нь бүтэн
+# 4.5% хүрсэн арилжааны ашиг талаараа багасна — энэ бол ухамсартай солилцоо.
+PARTIAL_TP_ENABLED = _cfg.get("partial_tp_enabled", False)
+PARTIAL_TP_PCT = _cfg.get("partial_tp_pct", 2.0)
+PARTIAL_TP_RATIO = _cfg.get("partial_tp_ratio", 0.5)
+# Breakeven нь яг entry биш: орох/гарах шимтгэл (~0.08% notional) -ыг нөхөх
+# бага зэргийн зайтай байх ёстой, эс тэгвээс "breakeven" нь бодитоор алдагдал.
+BREAKEVEN_OFFSET_PCT = _cfg.get("breakeven_offset_pct", 0.1)
+
 TARGET_PROFIT = _cfg["target_profit_usdt"]
 TARGET_COOLDOWN_SEC = _cfg["target_cooldown_sec"]
 
@@ -103,6 +115,11 @@ TREND_HTF_MIN_SLOPE = _cfg.get("trend_htf_min_slope", 1.0)
 # ---- ШИНЭ: News Trading ----
 NEWS_TRADING = _cfg.get("news_trading", {})
 NEWS_ENABLED = NEWS_TRADING.get("enabled", False)
+# Эвентийн өмнөх түр зогсоолт (NEWS_ENABLED) ба эвентийн дараах арилжаа хоёр
+# тусдаа флаг. Зогсоолт нь эрсдэл бууруулдаг тул дангаараа асахад утгатай;
+# дараах арилжаа нь хөдөлгөөн рүү нь үсрэх бөгөөд батлагдаагүй тул анхдагчаар унтарсан.
+NEWS_POST_TRADE_ENABLED = NEWS_TRADING.get("post_news_trade", False)
+NEWS_EVENT_KEYWORDS = NEWS_TRADING.get("event_keywords", ["CPI", "FOMC"])
 NEWS_CALENDAR_URL = NEWS_TRADING.get("calendar_url", "")
 NEWS_PAUSE_BEFORE = NEWS_TRADING.get("pause_before_minutes", 30)
 NEWS_WAIT_AFTER = NEWS_TRADING.get("wait_after_minutes", 15)

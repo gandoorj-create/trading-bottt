@@ -40,10 +40,14 @@ def sync_existing_positions():
         # Хадгалсан бүртгэлээс жинхэнэ стратегийг сэргээх оролдлого. Тал (BUY/SELL)
         # таарахгүй бол өөр арилжаа гэж үзээд RECOVERED хэвээр үлдээнэ.
         saved = saved_trades.get(symbol)
+        saved_partial_tp = None
+        saved_breakeven = False
         if isinstance(saved, dict) and saved.get("side") == side and saved.get("strategy") in STRATEGY_NAMES:
             strategy = saved["strategy"]
             opened_at = utils.safe_float(saved.get("opened_at"), time.time())
             opened_at_ms = int(utils.safe_float(saved.get("opened_at_ms"), opened_at * 1000))
+            saved_partial_tp = saved.get("partial_tp_price")
+            saved_breakeven = bool(saved.get("breakeven_done"))
             log.info(f"🔄 RESTORED {symbol} → strategy={strategy} (хадгалсан бүртгэлээс)")
         else:
             strategy = "RECOVERED"
@@ -66,15 +70,27 @@ def sync_existing_positions():
             "entry_order_id": None,
             "sl_order_id": None,
             "tp_order_id": None,
+            "partial_tp_price": saved_partial_tp,
+            "breakeven_done": saved_breakeven,
             "recovered": True
         }
 
         if not has_protection:
             log.info(f"🔄 RECOVERED {symbol} WITHOUT protection – rebuilding...")
-            success, _, _ = rebuild_protection_orders(symbol, side, qty, entry, position_side)
+            # Хэсэгчилсэн TP нь өмнө нь биелчихсэн байсан бол stop-ыг 3% алдагдал
+            # руу буцаахгүй — breakeven дээр нь сэргээнэ.
+            be_stop = None
+            if saved_breakeven:
+                offset = BREAKEVEN_OFFSET_PCT / 100
+                be_stop = entry * (1 + offset) if side == "BUY" else entry * (1 - offset)
+            success, _, _ = rebuild_protection_orders(symbol, side, qty, entry, position_side, stop_price=be_stop)
             if not success:
                 state.unprotected_symbols.add(symbol)
                 notifications.send_telegram(format_block("RECOVERED POSITION WITHOUT PROTECTION", "🚨", [("Symbol", symbol)]))
+            elif not saved_breakeven:
+                state.active_trade_info[symbol]["partial_tp_price"] = place_partial_tp(
+                    symbol, side, qty, entry, position_side
+                )
         else:
             log.info(f"🔄 RECOVERED POSITION: {symbol} (protected)")
 
@@ -124,7 +140,13 @@ def calculate_trailing_activation(symbol, signal, entry_price):
     return market_data.round_price(symbol, activation)
 
 
-def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side):
+def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side, stop_price=None):
+    """Symbol дээрх хамгаалалтыг цоо шинээр барина (хуучныг нь цуцлаад).
+
+    stop_price: заасан бол хатуу stop-ыг entry-ээс EMERGENCY_SL_PCT-аар тооцохын
+    оронд яг энэ түвшинд тавина. Хэсэгчилсэн TP биелсний дараа stop-ыг breakeven
+    руу зөөхөд хэрэглэнэ.
+    """
     close_side = "SELL" if side == "BUY" else "BUY"
     if quantity <= 0 or entry_price <= 0:
         return False, None, None
@@ -135,6 +157,9 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
     else:
         tp_price = market_data.round_price(symbol, entry_price * (1 - TAKE_PROFIT_PCT / 100))
         emergency_sl_price = market_data.round_price(symbol, entry_price * (1 + EMERGENCY_SL_PCT / 100))
+
+    if stop_price is not None:
+        emergency_sl_price = market_data.round_price(symbol, stop_price)
 
     if tp_price is None or emergency_sl_price is None:
         return False, None, None
@@ -170,6 +195,123 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
 
     state.unprotected_symbols.discard(symbol)
     return True, tp_price, activation_price
+
+
+def place_partial_tp(symbol, side, quantity, entry_price, position_side):
+    """Хэсэгчилсэн TP байрлуулж, trigger үнийг нь буцаана (эсвэл None).
+
+    Best-effort: бүтэлгүйтсэн ч хатуу SL ба бүтэн TP хэвээр амьд тул арилжааг
+    зогсоох шалтгаан болохгүй — зүгээр л scale-out хийхгүй гэсэн үг.
+    Заавал rebuild_protection_orders-ын ДАРАА дуудна: тэр нь эхлээд symbol дээрх
+    бүх conditional захиалгыг цуцалдаг тул урьд нь байрлуулбал устгагдана.
+    """
+    if not PARTIAL_TP_ENABLED or quantity <= 0 or entry_price <= 0:
+        return None
+    if not 0 < PARTIAL_TP_RATIO < 1:
+        return None
+
+    partial_qty = market_data.round_quantity(symbol, quantity * PARTIAL_TP_RATIO)
+    if partial_qty is None or partial_qty <= 0 or partial_qty >= quantity:
+        return None
+
+    if side == "BUY":
+        tp_price = market_data.round_price(symbol, entry_price * (1 + PARTIAL_TP_PCT / 100))
+    else:
+        tp_price = market_data.round_price(symbol, entry_price * (1 - PARTIAL_TP_PCT / 100))
+    if tp_price is None:
+        return None
+
+    # Хагас позиц нь биржийн доод хэмжээнд хүрэхгүй бол захиалга татгалзагдана —
+    # алдаа хүлээхийн оронд урьдчилж алгасна.
+    info = market_data.get_symbol_info(symbol)
+    if info and info.get("minQty"):
+        min_qty = utils.safe_float(info.get("minQty"))
+        if min_qty > 0 and partial_qty < min_qty:
+            log.info(f"⏸️ {symbol}: partial TP хэмжээ minQty-ээс бага — scale-out алгаслаа")
+            return None
+    if not market_data.check_min_notional(symbol, tp_price, partial_qty):
+        log.info(f"⏸️ {symbol}: partial TP notional хэт бага — scale-out алгаслаа")
+        return None
+
+    close_side = "SELL" if side == "BUY" else "BUY"
+    result = order_api.place_partial_take_profit_order(symbol, close_side, partial_qty, tp_price, position_side)
+    if utils.is_api_error(result):
+        log.warning(f"⚠️ {symbol}: partial TP байрлуулж чадсангүй ({result}) — бүтэн TP/SL хэвээр")
+        return None
+    log.info(f"🎯 PARTIAL TP {symbol}: {partial_qty} @ ${tp_price:,.6f} (+{PARTIAL_TP_PCT}%)")
+    return tp_price
+
+
+def move_stop_to_breakeven(symbol, trade, remaining_qty):
+    """Хэсэгчилсэн TP биелсний дараа үлдсэн позицын stop-ыг breakeven руу зөөнө."""
+    side = trade.get("side")
+    entry = utils.safe_float(trade.get("entry_price"), 0.0)
+    if side not in ("BUY", "SELL") or entry <= 0 or remaining_qty <= 0:
+        return False
+
+    # Яг entry биш: орох/гарах шимтгэлийг нөхөх зайтай, эс тэгвээс "breakeven"
+    # гэж нэрлэсэн stop бодитоор бага зэргийн алдагдал болно.
+    offset = BREAKEVEN_OFFSET_PCT / 100
+    raw = entry * (1 + offset) if side == "BUY" else entry * (1 - offset)
+    be_price = market_data.round_price(symbol, raw)
+    if be_price is None:
+        return False
+
+    log.info(f"🟩 PARTIAL TP FILLED {symbol} — үлдсэн {remaining_qty}, stop → breakeven ${be_price:,.6f}")
+    success, _, _ = rebuild_protection_orders(
+        symbol, side, remaining_qty, entry,
+        trade.get("position_side", "BOTH"), stop_price=be_price
+    )
+    if not success:
+        # breakeven_done-г тэмдэглэхгүй тул дараагийн мөчлөгт дахин оролдоно.
+        # Мэдэгдлийг зөвхөн нэг удаа илгээнэ.
+        if symbol not in state.unprotected_symbols:
+            notifications.send_telegram(format_block("BREAKEVEN STOP АМЖИЛТГҮЙ", "🚨", [
+                ("Symbol", symbol),
+                ("Статус", "Хамгаалалт сэргээгдсэнгүй — дараагийн мөчлөгт дахин оролдоно"),
+            ]))
+        state.unprotected_symbols.add(symbol)
+        return False
+
+    trade["quantity"] = remaining_qty
+    trade["breakeven_done"] = True
+    persistence.save_session_state()
+    notifications.send_telegram(format_block("ХЭСЭГЧИЛСЭН АШИГ АВЛАА", "🟩", [
+        ("Symbol", symbol),
+        ("Strategy", trade.get("strategy", "UNKNOWN")),
+        ("Хаасан", f"~{PARTIAL_TP_RATIO * 100:.0f}% @ {PARTIAL_TP_PCT}%"),
+        ("Үлдсэн", remaining_qty),
+        ("Stop", f"breakeven ${be_price:,.6f}"),
+    ]))
+    return True
+
+
+def check_partial_tp_fills(positions):
+    """Хэсэгчилсэн TP биелснийг позицын хэмжээ буурснаар илрүүлнэ.
+
+    Algo (conditional) захиалгын биелэлтийг найдвартай жагсаах endpoint нь
+    тодорхойгүй тул нээлттэй позицын хэмжээг л үнэний эх сурвалж болгоно.
+    """
+    if not PARTIAL_TP_ENABLED or not 0 < PARTIAL_TP_RATIO < 1:
+        return
+    # Бүтэн ба хэсэгчилсэн хэмжээний дунд байрлах босго — бөөрөнхийлөлт болон
+    # хэсэгчилсэн биелэлтээс болж яг PARTIAL_TP_RATIO гарахгүй байж болно.
+    threshold = 1 - PARTIAL_TP_RATIO / 2
+    for pos in positions:
+        symbol = pos["symbol"]
+        trade = state.active_trade_info.get(symbol)
+        if not trade or trade.get("breakeven_done"):
+            continue
+        if not trade.get("partial_tp_price"):
+            continue
+        original = utils.safe_float(trade.get("quantity"), 0.0)
+        current = abs(utils.safe_float(pos.get("positionAmt"), 0.0))
+        if original <= 0 or current <= 0 or current > original * threshold:
+            continue
+        try:
+            move_stop_to_breakeven(symbol, trade, current)
+        except Exception as e:
+            log.error(f"❌ Breakeven {symbol}: {e}")
 
 
 def close_one_position(pos):
@@ -384,6 +526,10 @@ def monitor_positions():
 
     if not positions:
         return
+
+    # Telegram тайлангийн хязгаарлалтаас ӨМНӨ — breakeven зөөлт нь тайлангийн
+    # давтамжаас хамаарч хойшлох ёсгүй.
+    check_partial_tp_fills(positions)
 
     now = time.time()
     if now - state.last_telegram_report_time < TELEGRAM_REPORT_INTERVAL_SEC:
