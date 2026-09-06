@@ -156,14 +156,11 @@ def main():
             except Exception as e:
                 log.warning(f"⚠️ News check error: {e}")
 
-            if state.news_mode_active:
-                try:
-                    position_manager.monitor_positions()
-                except Exception as e:
-                    log.error(f"❌ Monitor error during news: {e}")
-                time.sleep(MONITOR_INTERVAL_SEC)
-                continue
-
+            # Мэдээний цонх дээр ӨМНӨ нь энд `continue` хийдэг байсан нь
+            # drawdown circuit breaker болон target шалгалтыг хамтад нь
+            # алгасдаг байв — яг эвентийн үед, өөрөөр хэлбэл тэдгээр
+            # хамгаалалт хамгийн хэрэгтэй мөчид. Шинэ арилжааг зогсоох
+            # хяналт нь execute_trades дотор байна.
             try:
                 risk.check_drawdown_circuit_breaker()
             except Exception as e:
@@ -208,6 +205,13 @@ def main():
                     state.safety_lock = True
                     time.sleep(MONITOR_INTERVAL_SEC)
                     continue
+
+            if state.news_mode_active:
+                # Screening-ийг хойшлуулна (last_selection_time-ыг урагшлуулахгүй
+                # тул цонх хаагдмагц шууд ажиллана). Позицын хяналт, drawdown,
+                # target бүгд дээр нь хэвийн үргэлжилсэн.
+                time.sleep(MONITOR_INTERVAL_SEC)
+                continue
 
             if current_time - last_selection_time >= SELECTION_INTERVAL_MINUTES * 60:
                 cycle_count += 1

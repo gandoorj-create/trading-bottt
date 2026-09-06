@@ -3182,3 +3182,47 @@ class TestNewsLookupBackoff:
         news.check_news_status()
 
         assert bot_state.news_mode_active is False
+
+
+# ----------------------------------------------------------------
+# Мэдээний цонх нь ЗӨВХӨН шинэ арилжааг зогсооно
+#
+# Өмнө нь үндсэн гогцоо мэдээний цонхон дээр `continue` хийдэг байсан нь
+# drawdown circuit breaker болон target шалгалтыг хамтад нь алгасдаг байв —
+# яг эвентийн үед, өөрөөр хэлбэл тэдгээр хамгаалалт хамгийн хэрэгтэй мөчид.
+# ----------------------------------------------------------------
+
+class TestNewsWindowScope:
+    def test_new_trades_are_blocked_during_the_window(self, tradeable):
+        bot_state.news_mode_active = True
+
+        execution.execute_trades([_coin()], total_balance=1000.0)
+
+        assert tradeable == []
+        assert "BTCUSDT" not in bot_state.active_trade_info
+
+    def test_trades_resume_once_the_window_closes(self, tradeable):
+        bot_state.news_mode_active = False
+
+        execution.execute_trades([_coin()], total_balance=1000.0)
+
+        assert len(tradeable) == 1
+
+    def test_the_drawdown_breaker_still_runs_during_the_window(self, monkeypatch):
+        bot_state.news_mode_active = True
+        patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 10.0)
+        bot_state.session_peak_balance = 1000.0
+        monkeypatch.setattr(account, "get_usdt_balance", lambda: 850.0)
+
+        risk.check_drawdown_circuit_breaker()
+
+        assert bot_state.drawdown_halt is True
+
+    def test_position_monitoring_still_runs_during_the_window(self, monkeypatch, monitor_env):
+        bot_state.news_mode_active = True
+        bot_state.active_trade_info["BTCUSDT"] = _trade_info()
+        monkeypatch.setattr(account, "get_positions", lambda: [])
+
+        position_manager.monitor_positions()
+
+        assert monitor_env == ["BTCUSDT"]      # хаагдсаныг илрүүлж бүртгэсэн

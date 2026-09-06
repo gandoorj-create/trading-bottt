@@ -25,6 +25,12 @@ def execute_trades(selected_coins, total_balance):
     if state.safety_lock:
         log.info("🔒 SAFETY LOCK: new trades disabled")
         return
+    # Мэдээний цонх нь ЗӨВХӨН шинэ арилжаа нээхийг зогсооно. Хяналтыг энд
+    # барьснаар дуудлагын бүх зам (мөчлөгийн screening, target-ын дараах
+    # auto-resume) нэг дүрэмд захирагдана.
+    if state.news_mode_active:
+        log.info("📰 NEWS WINDOW: new trades paused")
+        return
     if not selected_coins:
         return
 
