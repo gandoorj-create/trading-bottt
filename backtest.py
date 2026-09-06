@@ -106,6 +106,31 @@ def simulation_mode(equity_getter):
 # Өгөгдөл
 # ----------------------------------------------------------------
 
+def exec_bars_agree(signal_df, exec_df, samples=40, tolerance=0.02):
+    """Нарийн лаа нь 1h лаатай ижил үнийн цувааг илэрхийлж байгаа эсэх.
+
+    Хоёр давтамжийн өгөгдөл зөрөх нь (тухайн symbol-ийн 15м түүх хожуу
+    эхэлсэн, өөр хос татагдсан, эсвэл эх сурвалж эвдэрсэн) чимээгүй боловч
+    гамшигтай: entry нь 1h барын нээлтээр тогтоогдож, гарц нь огт өөр үнэ
+    дээр шийдэгдэн арилжаа бүр цоорхойгоор stop цохисон мэт харагдана.
+    Ийм үед 1h лаа руу буцах нь бүдүүлэг ч ҮНЭН үр дүн өгнө.
+    """
+    if exec_df is None or len(exec_df) == 0:
+        return False
+    exec_open = dict(zip(exec_df["time"] // HOUR_MS * HOUR_MS, exec_df["open"]))
+    checked = mismatched = 0
+    for ts, open_price in zip(signal_df["time"].iloc[-samples:], signal_df["open"].iloc[-samples:]):
+        other = exec_open.get(int(ts) // HOUR_MS * HOUR_MS)
+        if other is None or open_price <= 0:
+            continue
+        checked += 1
+        if abs(other - open_price) / open_price > tolerance:
+            mismatched += 1
+    if checked < samples // 4:
+        return False
+    return mismatched <= checked * 0.1
+
+
 def load_history(symbols, days, exec_interval="15m", progress=True, data_url=None):
     """Signal-ийн 1h лаа, гарц шийдэх нарийн лаа, funding түүх.
 
@@ -127,11 +152,15 @@ def load_history(symbols, days, exec_interval="15m", progress=True, data_url=Non
                 log.warning(f"⚠️ {symbol}: хангалттай түүх алга ({len(signal_df)} лаа) — алгаслаа")
                 continue
             exec_df = market_data.get_klines_range(symbol, exec_interval, start_ms, now_ms)
+            used_interval = exec_interval
+            if not exec_bars_agree(signal_df, exec_df):
+                log.warning(f"⚠️ {symbol}: {exec_interval} лаа 1h-тэй таарахгүй — гарцыг 1h дээр шийднэ")
+                exec_df, used_interval = signal_df, "1h"
             funding = market_data.get_funding_history(symbol, start_ms, now_ms) if FUNDING_ENABLED else []
             data[symbol] = {
                 "signal": signal_df,
-                "exec": exec_df if len(exec_df) else signal_df,
-                "exec_interval": exec_interval if len(exec_df) else "1h",
+                "exec": exec_df,
+                "exec_interval": used_interval,
                 "funding": funding,
             }
     return data

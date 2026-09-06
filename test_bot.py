@@ -3719,3 +3719,70 @@ class TestBacktestStateIsolation:
 
         assert bot_state.safety_lock is False
         assert bot_state.drawdown_halt is False
+
+
+class TestExecBarsConsistency:
+    """Нарийн лаа нь 1h лаатай ижил үнийн цуваа мөн эсэх.
+
+    Хоёр давтамжийн өгөгдөл зөрвөл (symbol-ийн 15м түүх хожуу эхэлсэн, эх
+    сурвалж эвдэрсэн) entry нь 1h барын нээлтээр тогтоод гарц нь огт өөр үнэ
+    дээр шийдэгдэж, арилжаа бүр цоорхойгоор stop цохисон мэт харагдана —
+    чимээгүй боловч гамшигтай. Ийм үед 1h руу буцах нь бүдүүлэг ч ҮНЭН.
+    """
+
+    def _hourly(self, n=60, base=100.0, start=0):
+        return pd.DataFrame({
+            "time": [start + i * 3_600_000 for i in range(n)],
+            "open": [base + i for i in range(n)], "high": [base + i + 1 for i in range(n)],
+            "low": [base + i - 1 for i in range(n)], "close": [base + i + 0.5 for i in range(n)],
+            "volume": [1.0] * n,
+        })
+
+    def _quarters(self, hourly, shift=0.0):
+        rows = []
+        for row in hourly.to_dict("records"):
+            for q in range(4):
+                rows.append({**row, "time": row["time"] + q * 900_000,
+                             "open": row["open"] + shift + q * 0.01})
+        return pd.DataFrame(rows)
+
+    def test_matching_series_are_accepted(self):
+        hourly = self._hourly()
+
+        assert backtest.exec_bars_agree(hourly, self._quarters(hourly)) is True
+
+    def test_a_diverging_series_is_rejected(self):
+        hourly = self._hourly()
+
+        assert backtest.exec_bars_agree(hourly, self._quarters(hourly, shift=40.0)) is False
+
+    def test_missing_fine_bars_are_rejected(self):
+        assert backtest.exec_bars_agree(self._hourly(), pd.DataFrame()) is False
+
+    def test_barely_overlapping_history_is_rejected(self):
+        hourly = self._hourly(n=60)
+        # Нарийн лаа нь зөвхөн сүүлийн 5 цагийг хамарна
+        short = self._quarters(hourly.iloc[-5:])
+
+        assert backtest.exec_bars_agree(hourly, short) is False
+
+    def test_a_few_outliers_do_not_reject_a_good_series(self):
+        hourly = self._hourly()
+        fine = self._quarters(hourly)
+        fine.loc[0, "open"] = 9999.0        # ганц гажиг
+
+        assert backtest.exec_bars_agree(hourly, fine) is True
+
+    def test_load_history_falls_back_to_hourly_bars_on_a_mismatch(self, monkeypatch):
+        hourly = self._hourly(n=700)
+        monkeypatch.setattr(binance_client, "current_timestamp_ms", lambda: 1_700_000_000_000)
+        monkeypatch.setattr(market_data, "get_funding_history", lambda *a, **kw: [])
+        monkeypatch.setattr(backtest, "SIGNAL_WINDOW", 600)
+        monkeypatch.setattr(market_data, "get_klines_range",
+                            lambda symbol, interval, *a, **kw:
+                                hourly if interval == "1h" else self._quarters(hourly, shift=40.0))
+
+        data = backtest.load_history(["BTCUSDT"], days=5, progress=False, data_url=None)
+
+        assert data["BTCUSDT"]["exec_interval"] == "1h"
+        assert len(data["BTCUSDT"]["exec"]) == len(hourly)
