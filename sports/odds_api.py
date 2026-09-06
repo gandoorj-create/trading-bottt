@@ -2,11 +2,11 @@
 odds_api.py
 The Odds API-с спортын ханш татах client.
 """
+import logging
 import requests
-from settings import ODDS_API_KEY, ODDS_API_BASE_URL, REQUEST_TIMEOUT
-from logging_setup import get_logger
+from sports_config import ODDS_API_KEY, ODDS_API_BASE_URL, REQUEST_TIMEOUT
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 class OddsAPIError(Exception):

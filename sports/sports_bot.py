@@ -10,25 +10,30 @@ The Odds API-с татаж, Pinnacle-ийн ханшнаас vig цэвэрлэ�
 Бооцоог АВТОМАТААР ТАВИХГҮЙ — зөвхөн санал болгоно, чи гараар тавина.
 """
 import argparse
+import logging
+import os
 import time
 import traceback
 from datetime import datetime
 
 import kelly
-import notifications
+import telegram_notify
 import sports_journal
 import sports_state
-from settings import (
-    STATE_DIR, STATE_DIR_IS_PERSISTENT,
+from sports_config import (
     SPORTS_LIST, SPORTS_REGIONS, SPORTS_SCAN_INTERVAL_MINUTES, SPORTS_MIN_EDGE_PCT,
     SPORTS_TOP_N, SPORTS_BANKROLL_USD, SPORTS_KELLY_MULTIPLIER, SPORTS_MAX_STAKE_PCT,
     SPORTS_BOT_TOKEN, SPORTS_CHAT_ID,
     validate_sports_config,
 )
 from value_scanner import scan_sport, make_key
-from logging_setup import get_logger, setup_logging
 
-log = get_logger(__name__)
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)-7s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("sports_bot")
 
 SPORT_LABELS = {
     "basketball_nba": "NBA",
@@ -88,7 +93,7 @@ def run_scan_cycle():
         sports_journal.record_alert(bet, kelly_pct, stake)
         seen[key] = now
 
-    notifications.send_telegram("\n\n".join(lines), bot_token=SPORTS_BOT_TOKEN, chat_id=SPORTS_CHAT_ID)
+    telegram_notify.send_telegram("\n\n".join(lines), bot_token=SPORTS_BOT_TOKEN, chat_id=SPORTS_CHAT_ID)
     sports_state.save_seen(seen)
     log.info(f"📡 {datetime.now().strftime('%H:%M:%S')} | {len(top)} value bet Telegram-руу илгээв (нийт {len(all_bets)} эдж)")
 
@@ -100,7 +105,7 @@ def _safe_run_cycle():
         error = traceback.format_exc()
         log.error(f"❌ SCAN ERROR\n{error}")
         try:
-            notifications.send_telegram(
+            telegram_notify.send_telegram(
                 f"❌ Sports scanner алдаа:\n{error[:500]}",
                 bot_token=SPORTS_BOT_TOKEN, chat_id=SPORTS_CHAT_ID,
             )
@@ -117,7 +122,6 @@ def main():
     )
     args = parser.parse_args()
 
-    setup_logging(STATE_DIR, STATE_DIR_IS_PERSISTENT)
     log.info("=" * 70)
     log.info("🏀🏈⚾⚽ SPORTS VALUE BET SCANNER")
     log.info(f"Sports: {', '.join(SPORTS_LIST)}")

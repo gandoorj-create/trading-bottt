@@ -7,12 +7,12 @@ sports_journal.py
 шалгана.
 """
 import csv
+import logging
 import os
 import time
-from settings import SPORTS_JOURNAL_FILE, SPORTS_JOURNAL_ENABLED
-from logging_setup import get_logger
+from sports_config import SPORTS_JOURNAL_FILE, SPORTS_JOURNAL_ENABLED
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 FIELDNAMES = (
     "sent_at", "sport", "matchup", "commence_time", "market", "selection",

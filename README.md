@@ -443,33 +443,49 @@ positions = account.get_positions()      # ✅
 гэж бичихэд зөвхөн локал нэр солигдож, бусад модуль хуучин утгыг хараад
 **арилжаа зогсох ёстой газраа зогсохгүй** байх эрсдэлтэй.
 
-## Sports Value Bet Scanner (`sports_bot.py`)
+## Sports Value Bet Scanner (`sports/` folder)
 
-Crypto ботоос тусдаа, бие даасан скрипт. NBA/NFL/MLB/хөлбөмбөгийн ханшийг
+Crypto ботоос **бүрэн тусдаа** — `sports/` folder дотор өөрийн код, өөрийн
+тохиргоо (`sports_config.py`/`sports_config.json`), өөрийн Telegram sender
+(`telegram_notify.py`)-той. Crypto ботын `settings.py`/`notifications.py`/
+`config.json`-ыг огт ашиглахгүй (зөвхөн repo үндсэн `.env` файлыг өөр
+префикстэй key-үүдээр хуваалцдаг). NBA/NFL/MLB/хөлбөмбөгийн ханшийг
 [The Odds API](https://the-odds-api.com)-с татаж, Pinnacle (sharp book)-ийн
 ханшнаас vig цэвэрлээд бодит магадлал гаргаж, бусад bookmaker-той харьцуулна.
+
+```
+sports/
+  sports_config.py / sports_config.json   ← бие даасан тохиргоо
+  telegram_notify.py                      ← бие даасан Telegram sender
+  odds_api.py, devig.py, kelly.py, value_scanner.py
+  sports_state.py, sports_journal.py      ← dedupe cache, paper-trading журнал
+  sports_bot.py                           ← оруулах цэг
+  test_sports_bot.py
+```
 
 - **Зах зээл**: зөвхөн `h2h` (хэн хожих) + `spreads` (гандикап). Props орхигдсон.
 - **Handicap яг таарах шаардлага**: `-5.5` зөвхөн `-5.5`-тай харьцуулагдана
   (`value_scanner.py` — `point` талбар таарахгүй бол edge тооцохгүй).
 - **De-vig**: `devig.py` — proportional/multiplicative арга (implied prob-ыг
   overround-д харьцуулж нормчилно).
-- **Скан**: `sports_scanner.scan_interval_minutes` (анхдагч 15 мин) тутам,
-  `min_edge_pct`-аас (анхдагч 3%) дээш EV-тэй bet-үүдийг EV-ээр эрэмбэлж топ
-  `top_n`-ыг Telegram руу явуулна.
+- **Скан**: `scan_interval_minutes` (анхдагч 15 мин) тутам, `min_edge_pct`-аас
+  (анхдагч 3%) дээш EV-тэй bet-үүдийг EV-ээр эрэмбэлж топ `top_n`-ыг
+  Telegram руу явуулна.
 - **Давхардал**: `event+market+line+book+selection` key-гээр
-  (`sports_state.py`, `sports_seen.json`) — нэг bet хоёр удаа мэдэгдэхгүй.
+  (`sports_state.py`, `sports/sports_seen.json`) — нэг bet хоёр удаа
+  мэдэгдэхгүй.
 - **Stake**: `kelly.py` — 1/4 Kelly, `max_stake_pct`-аар хязгаарлагдана
   (анхдагч 3%). Бооцоог АВТОМАТААР ТАВИХГҮЙ — зөвхөн санал болгоно, гараар
   тавина (bookmaker-ууд auto-bet-ийг таньж аккаунт хаадаг).
-- **Бүртгэл**: `sports_journal.py` → `sports_bets.csv`. `result`/`pnl`
+- **Бүртгэл**: `sports_journal.py` → `sports/sports_bets.csv`. `result`/`pnl`
   баганыг гараар нөхөж, edge үнэхээр байгаа эсэхийг цаасан дээр эхлээд
   шалгана (200-300 бооцоо).
 
-Тохиргоо: `.env`-д `ODDS_API_KEY` + тусдаа `SPORTS_TELEGRAM_BOT_TOKEN`/
-`SPORTS_TELEGRAM_CHAT_ID` (crypto ботын bot-той холилдохгүй, @BotFather-с
-шинээр `/newbot`), `config.json`-ы `sports_scanner` блок (спортын жагсаалт,
-region, bankroll, edge босго гэх мэт). Ажиллуулах: `python sports_bot.py`.
+Тохиргоо: repo үндсэн `.env`-д `ODDS_API_KEY` + тусдаа
+`SPORTS_TELEGRAM_BOT_TOKEN`/`SPORTS_TELEGRAM_CHAT_ID` (crypto ботын bot-той
+холилдохгүй, @BotFather-с шинээр `/newbot`), `sports/sports_config.json`
+(спортын жагсаалт, region, bankroll, edge босго гэх мэт).
+Ажиллуулах: `cd sports && python sports_bot.py`.
 
 ### Хост: Railway шаардлагагүй — GitHub Actions (үнэгүй)
 
@@ -481,7 +497,7 @@ region, bankroll, edge босго гэх мэт). Ажиллуулах: `python 
    байх ёстой — `schedule` trigger зөвхөн тэндхийн workflow-г ажиллуулна.
 2. Repo → Settings → Secrets and variables → Actions руу орж нэмнэ:
    `ODDS_API_KEY`, `SPORTS_TELEGRAM_BOT_TOKEN`, `SPORTS_TELEGRAM_CHAT_ID`.
-3. Dedupe cache (`sports_seen.json`) болон journal (`sports_bets.csv`)-ыг
+3. Dedupe cache (`sports/sports_seen.json`) болон journal (`sports/sports_bets.csv`)-ыг
    ажиллагаа бүрийн төгсгөлд workflow өөрөө repo руу commit хийж хадгална
    (Actions runner бүр шинээр эхэлдэг тул үгүй бол dedupe/бүртгэл алга болно).
 

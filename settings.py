@@ -162,45 +162,6 @@ NEWS_MIN_MOVE = NEWS_TRADING.get("min_move_pct", 0.5)
 NEWS_SYMBOLS = NEWS_TRADING.get("symbols", ["BTCUSDT"])
 
 
-# ---- Спортын Value Bet Scanner (The Odds API) ----
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
-ODDS_API_BASE_URL = os.environ.get("ODDS_API_BASE_URL", "https://api.the-odds-api.com")
-
-# Crypto ботоос тусдаа Telegram bot — мэдэгдэл холилдохгүй байх зорилготой.
-SPORTS_BOT_TOKEN = os.environ.get("SPORTS_TELEGRAM_BOT_TOKEN")
-SPORTS_CHAT_ID = os.environ.get("SPORTS_TELEGRAM_CHAT_ID")
-
-SPORTS_SCANNER = _cfg.get("sports_scanner", {})
-SPORTS_LIST = SPORTS_SCANNER.get(
-    "sports", ["basketball_nba", "americanfootball_nfl", "baseball_mlb", "soccer_epl"]
-)
-SPORTS_REGIONS = SPORTS_SCANNER.get("regions", ["eu", "us", "uk"])
-SPORTS_SCAN_INTERVAL_MINUTES = SPORTS_SCANNER.get("scan_interval_minutes", 15)
-SPORTS_MIN_EDGE_PCT = SPORTS_SCANNER.get("min_edge_pct", 3.0)
-SPORTS_TOP_N = SPORTS_SCANNER.get("top_n", 5)
-SPORTS_BANKROLL_USD = SPORTS_SCANNER.get("bankroll_usd", 1000.0)
-SPORTS_KELLY_MULTIPLIER = SPORTS_SCANNER.get("kelly_multiplier", 0.25)
-SPORTS_MAX_STAKE_PCT = SPORTS_SCANNER.get("max_stake_pct", 3.0) / 100.0
-SPORTS_SEEN_TTL_HOURS = SPORTS_SCANNER.get("seen_ttl_hours", 72)
-SPORTS_JOURNAL_ENABLED = SPORTS_SCANNER.get("journal_enabled", True)
-SPORTS_JOURNAL_FILE = os.path.join(STATE_DIR, SPORTS_SCANNER.get("journal_file", "sports_bets.csv"))
-SPORTS_SEEN_FILE = os.path.join(STATE_DIR, SPORTS_SCANNER.get("seen_file", "sports_seen.json"))
-
-
-def validate_sports_config():
-    missing = []
-    if not ODDS_API_KEY:
-        missing.append("ODDS_API_KEY")
-    if not SPORTS_BOT_TOKEN:
-        missing.append("SPORTS_TELEGRAM_BOT_TOKEN")
-    if not SPORTS_CHAT_ID:
-        missing.append("SPORTS_TELEGRAM_CHAT_ID")
-    if missing:
-        raise RuntimeError(
-            ".env дотор дараах утга дутуу байна: " + ", ".join(missing)
-        )
-
-
 def validate_config():
     missing = []
     if not API_KEY:
