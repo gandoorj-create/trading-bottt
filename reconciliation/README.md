@@ -39,16 +39,35 @@ python reconciliation/reconcile.py
 тоо) болон `Mismatch` (зөвхөн зөрсөн мөрүүд, аль талд байгаа нь тодорхой) хоёр sheet-тэй.
 Script зөрүүтэй бол exit code 1, зөрүүгүй бол 0-ээр гардаг тул cron/CI дотор шалгаж болно.
 
-## Өдөр бүр автоматаар ажиллуулах
+## Windows PC дээр дарж ажиллуулах (`run_reconcile.bat`)
+
+1. Python суулгаагүй бол [python.org](https://www.python.org/downloads/)-оос
+   суулгана — суулгах үед "**Add python.exe to PATH**" гэдгийг заавал чагтална.
+2. Энэ repo-г PC-рүүгээ татна: GitHub дээр **Code → Download ZIP** дараад
+   задлах, эсвэл `git clone`.
+3. `reconciliation\run_reconcile.bat` файл дээр **давхар дарна**. Анх удаа
+   ажиллахад python орчин үүсгэж, шаардлагатай package-уудыг суулгах тул
+   хэсэг хугацаа авна; дараагийн удаа хурдан ажиллана.
+4. Дуусмагц зөрүү байвал `reconciliation\reports\mismatch_report.xlsx`
+   автоматаар нээгдэнэ.
+
+### Desktop дээр icon болгох
+
+`run_reconcile.bat` файл дээр хулганы баруун товч → **Send to → Desktop
+(create shortcut)**. Desktop дээр гарч ирсэн shortcut дээр баруун товч →
+**Properties → Change Icon...** -оор дуртай `.ico` файл сонгоод OK дарна.
+Ингэснээр desktop дээрх icon дээр давхар дарахад л тулгалт ажиллана.
+
+### Өдөр бүр автоматаар ажиллуулах
+
+**Windows Task Scheduler**: "Create Task" → Trigger: Daily 08:00 → Action:
+Program/script-д `run_reconcile.bat`-ын бүтэн замыг оруулна (жишээ нь
+`C:\trading-bottt\reconciliation\run_reconcile.bat`).
 
 **Linux/cron** (`crontab -e`):
 ```
 0 8 * * * cd /path/to/trading-bottt && /usr/bin/python3 reconciliation/reconcile.py >> reconciliation/reconcile.log 2>&1
 ```
-
-**Windows Task Scheduler**: "Create Task" → Trigger: Daily 08:00 → Action:
-`python.exe` эхлүүлж, Arguments-д `reconciliation\reconcile.py`, Start in-д
-repo-ийн зам.
 
 ## Хязгаарлалт
 
