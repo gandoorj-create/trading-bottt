@@ -9,6 +9,7 @@ The Odds API-с татаж, Pinnacle-ийн ханшнаас vig цэвэрлэ�
 
 Бооцоог АВТОМАТААР ТАВИХГҮЙ — зөвхөн санал болгоно, чи гараар тавина.
 """
+import argparse
 import time
 import traceback
 from datetime import datetime
@@ -92,7 +93,30 @@ def run_scan_cycle():
     log.info(f"📡 {datetime.now().strftime('%H:%M:%S')} | {len(top)} value bet Telegram-руу илгээв (нийт {len(all_bets)} эдж)")
 
 
+def _safe_run_cycle():
+    try:
+        run_scan_cycle()
+    except Exception:
+        error = traceback.format_exc()
+        log.error(f"❌ SCAN ERROR\n{error}")
+        try:
+            notifications.send_telegram(
+                f"❌ Sports scanner алдаа:\n{error[:500]}",
+                bot_token=SPORTS_BOT_TOKEN, chat_id=SPORTS_CHAT_ID,
+            )
+        except Exception:
+            pass
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Sports Value Bet Scanner")
+    parser.add_argument(
+        "--once", action="store_true",
+        help="Тасралтгүй давталтын оронд нэг л скан хийгээд гарна "
+             "(GitHub Actions зэрэг cron дээр ажиллуулахад зориулсан)",
+    )
+    args = parser.parse_args()
+
     setup_logging(STATE_DIR, STATE_DIR_IS_PERSISTENT)
     log.info("=" * 70)
     log.info("🏀🏈⚾⚽ SPORTS VALUE BET SCANNER")
@@ -107,19 +131,12 @@ def main():
         log.error(f"❌ CONFIG ERROR: {e}")
         return
 
+    if args.once:
+        _safe_run_cycle()
+        return
+
     while True:
-        try:
-            run_scan_cycle()
-        except Exception:
-            error = traceback.format_exc()
-            log.error(f"❌ SCAN ERROR\n{error}")
-            try:
-                notifications.send_telegram(
-                    f"❌ Sports scanner алдаа:\n{error[:500]}",
-                    bot_token=SPORTS_BOT_TOKEN, chat_id=SPORTS_CHAT_ID,
-                )
-            except Exception:
-                pass
+        _safe_run_cycle()
         time.sleep(SPORTS_SCAN_INTERVAL_MINUTES * 60)
 
 

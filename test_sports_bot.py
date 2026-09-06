@@ -3,6 +3,8 @@ test_sports_bot.py
 Спортын Value Bet Scanner-ийн тест: de-vig математик, Kelly stake,
 handicap line таарах шаардлага, EV босго, давхардал таслах dedupe.
 """
+import sys
+
 import pytest
 
 import devig
@@ -312,3 +314,33 @@ def test_validate_sports_config_requires_sports_bot_token(monkeypatch):
     monkeypatch.setattr(settings, "SPORTS_CHAT_ID", "c")
     with pytest.raises(RuntimeError, match="SPORTS_TELEGRAM_BOT_TOKEN"):
         settings.validate_sports_config()
+
+
+# ---------------------------------------------------------------------------
+# --once горим (GitHub Actions cron-д зориулсан)
+# ---------------------------------------------------------------------------
+
+def test_main_once_runs_single_cycle_without_sleeping(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sports_bot, "run_scan_cycle", lambda: calls.append(1))
+    monkeypatch.setattr(sports_bot, "validate_sports_config", lambda: None)
+    monkeypatch.setattr(
+        sports_bot.time, "sleep",
+        lambda s: pytest.fail("--once горимд sleep дуудагдах ёсгүй"),
+    )
+    monkeypatch.setattr(sys, "argv", ["sports_bot.py", "--once"])
+    sports_bot.main()
+    assert calls == [1]
+
+
+def test_main_once_stops_on_config_error(monkeypatch):
+    calls = []
+
+    def _raise():
+        raise RuntimeError("missing key")
+
+    monkeypatch.setattr(sports_bot, "run_scan_cycle", lambda: calls.append(1))
+    monkeypatch.setattr(sports_bot, "validate_sports_config", _raise)
+    monkeypatch.setattr(sys, "argv", ["sports_bot.py", "--once"])
+    sports_bot.main()
+    assert calls == []

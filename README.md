@@ -471,6 +471,25 @@ Crypto ботоос тусдаа, бие даасан скрипт. NBA/NFL/MLB/
 шинээр `/newbot`), `config.json`-ы `sports_scanner` блок (спортын жагсаалт,
 region, bankroll, edge босго гэх мэт). Ажиллуулах: `python sports_bot.py`.
 
+### Хост: Railway шаардлагагүй — GitHub Actions (үнэгүй)
+
+`.github/workflows/sports-scanner.yml` нь `sports_bot.py --once`-ыг 15 мин
+тутам GitHub Actions дээр ажиллуулна (24/7 сервер хэрэггүй, зээлийн карт
+шаардахгүй, GitHub-ийн үнэгүй quota дотор багтдаг). Асаахын тулд:
+
+1. Энэ workflow файл repo-гийн **default branch** (жишээ нь `main`) дээр
+   байх ёстой — `schedule` trigger зөвхөн тэндхийн workflow-г ажиллуулна.
+2. Repo → Settings → Secrets and variables → Actions руу орж нэмнэ:
+   `ODDS_API_KEY`, `SPORTS_TELEGRAM_BOT_TOKEN`, `SPORTS_TELEGRAM_CHAT_ID`.
+3. Dedupe cache (`sports_seen.json`) болон journal (`sports_bets.csv`)-ыг
+   ажиллагаа бүрийн төгсгөлд workflow өөрөө repo руу commit хийж хадгална
+   (Actions runner бүр шинээр эхэлдэг тул үгүй бол dedupe/бүртгэл алга болно).
+
+Хязгаарлалт: GitHub-ийн cron яг 15 мин тутамд биш, ачаалал ихсэх үед
+хойшлогдож болно; мөн 60 хоног commit ороогүй repo дээр автоматаар унтардаг
+(Actions tab-аас гараар дахин асаана). Үнэхээр тасралтгүй 24/7 процесс
+хүсвэл Fly.io эсвэл Oracle Cloud-ийн үнэгүй always-on VM илүү тохиромжтой.
+
 ## Мэдэгдэж буй хязгаарлалт
 
 - `position_manager.py` 682 мөр — цаашид хаалт/хяналтын хэсгийг салгаж болно
