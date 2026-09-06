@@ -10,3 +10,5 @@ session_state.json
 bot.log
 bot.log.*
 trades.csv
+sports_bets.csv
+sports_seen.json
