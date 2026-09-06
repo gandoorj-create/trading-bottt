@@ -4,12 +4,12 @@ sports_state.py
 (event+market+line+book+selection).
 """
 import json
+import logging
 import time
 from pathlib import Path
-from settings import SPORTS_SEEN_FILE, SPORTS_SEEN_TTL_HOURS
-from logging_setup import get_logger
+from sports_config import SPORTS_SEEN_FILE, SPORTS_SEEN_TTL_HOURS
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 def load_seen():

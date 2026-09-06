@@ -39,6 +39,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Value bet scan (нэг цикл)
+        working-directory: sports
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           SPORTS_TELEGRAM_BOT_TOKEN: ${{ secrets.SPORTS_TELEGRAM_BOT_TOKEN }}
@@ -53,6 +54,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f sports_seen.json sports_bets.csv 2>/dev/null || true
+          git add -f sports/sports_seen.json sports/sports_bets.csv 2>/dev/null || true
           git diff --cached --quiet || git commit -m "chore: sports scanner state [skip ci]"
           git push

@@ -9,11 +9,11 @@ bookmaker дээрх edge (EV%)-ийг тооцно.
 эс тэгвэл өөр тохиолдлын магадлалыг өөр тохиолдлын ханштай харьцуулсан
 хуурмаг edge гарна.
 """
+import logging
 from odds_api import fetch_odds, OddsAPIError
 from devig import devig_multiplicative
-from logging_setup import get_logger
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 PINNACLE_KEY = "pinnacle"
 MARKETS = ("h2h", "spreads")
