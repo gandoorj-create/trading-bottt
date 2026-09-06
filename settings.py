@@ -109,6 +109,10 @@ CORRELATION_CACHE_TTL = _cfg.get("correlation_cache_ttl", 3600)
 BACKTEST_ENABLED = _cfg.get("backtest_enabled", False)
 BACKTEST_DAYS = _cfg.get("backtest_days", 30)
 BACKTEST_INTERVAL = _cfg.get("backtest_interval", "1h")
+# Түүхэн лаа/funding-ыг үргэлж production-оос авна: demo/testnet эндпойнт нь
+# бодит бус эсвэл дутуу түүхтэй байдаг тул backtest утгагүй болно. Эдгээр нь
+# нээлттэй өгөгдөл — API түлхүүр шаардахгүй, арилжаа нь BASE_URL дээрээ хэвээр.
+BACKTEST_DATA_URL = _cfg.get("backtest_data_url", "https://fapi.binance.com")
 BACKTEST_FEE_RATE = _cfg.get("backtest_fee_rate", 0.0004)
 BACKTEST_SLIPPAGE_RATE = _cfg.get("backtest_slippage_rate", 0.0002)
 # ---- Арилжааны бүртгэл (CSV) ----

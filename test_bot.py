@@ -3629,3 +3629,50 @@ class TestBacktestReportDelivery:
         backtest.send_report_to_telegram("тайлан")
 
         assert "<pre>" not in telegram_messages[0]
+
+
+class TestBacktestDataSource:
+    """Түүхэн өгөгдөл нь production эндпойнтоос ирэх ёстой.
+
+    Бот demo дансан дээр ажилладаг ч demo-гийн лааны түүх богино/бодит бус
+    байдаг тул backtest-ыг утгагүй болгоно.
+    """
+
+    def test_history_is_fetched_from_the_production_endpoint(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(binance_client, "BASE_URL", "https://demo-fapi.binance.com")
+        monkeypatch.setattr(market_data, "get_klines_range",
+                            lambda *a, **kw: seen.append(binance_client.BASE_URL) or pd.DataFrame())
+        monkeypatch.setattr(market_data, "get_funding_history", lambda *a, **kw: [])
+        monkeypatch.setattr(binance_client, "current_timestamp_ms", lambda: 1_700_000_000_000)
+
+        backtest.load_history(["BTCUSDT"], days=5, progress=False,
+                              data_url="https://fapi.binance.com")
+
+        assert seen == ["https://fapi.binance.com"]
+
+    def test_the_trading_endpoint_is_restored_afterwards(self, monkeypatch):
+        monkeypatch.setattr(binance_client, "BASE_URL", "https://demo-fapi.binance.com")
+        monkeypatch.setattr(market_data, "get_klines_range", lambda *a, **kw: pd.DataFrame())
+        monkeypatch.setattr(market_data, "get_funding_history", lambda *a, **kw: [])
+        monkeypatch.setattr(binance_client, "current_timestamp_ms", lambda: 1_700_000_000_000)
+
+        backtest.load_history(["BTCUSDT"], days=5, progress=False,
+                              data_url="https://fapi.binance.com")
+
+        assert binance_client.BASE_URL == "https://demo-fapi.binance.com"
+
+    def test_the_endpoint_is_restored_even_when_the_download_fails(self, monkeypatch):
+        monkeypatch.setattr(binance_client, "BASE_URL", "https://demo-fapi.binance.com")
+        monkeypatch.setattr(binance_client, "current_timestamp_ms", lambda: 1_700_000_000_000)
+
+        def boom(*a, **kw):
+            raise ValueError("сүлжээ унтарлаа")
+
+        monkeypatch.setattr(market_data, "get_klines_range", boom)
+
+        with pytest.raises(ValueError):
+            backtest.load_history(["BTCUSDT"], days=5, progress=False,
+                                  data_url="https://fapi.binance.com")
+
+        assert binance_client.BASE_URL == "https://demo-fapi.binance.com"

@@ -50,6 +50,26 @@ SIGNAL_WINDOW = 600
 # ----------------------------------------------------------------
 
 @contextmanager
+def market_data_source(url):
+    """Түүхэн өгөгдлийг production эндпойнтоос уншина.
+
+    Бот demo дансан дээр ажилладаг ч demo-гийн лаа/funding түүх бодит бус,
+    эсвэл богино байдаг. Эдгээр нь нээлттэй эндпойнт тул түлхүүр хэрэггүй,
+    арилжааны зам нь BASE_URL дээрээ хэвээр үлдэнэ.
+    """
+    if not url or url == binance_client.BASE_URL:
+        yield
+        return
+    saved = binance_client.BASE_URL
+    binance_client.BASE_URL = url
+    log.info(f"📡 Түүхэн өгөгдөл: {url}")
+    try:
+        yield
+    finally:
+        binance_client.BASE_URL = saved
+
+
+@contextmanager
 def simulation_mode(equity_getter):
     """Telegram, диск, балансын дуудлагыг симуляц руу чиглүүлнэ.
 
@@ -77,7 +97,7 @@ def simulation_mode(equity_getter):
 # Өгөгдөл
 # ----------------------------------------------------------------
 
-def load_history(symbols, days, exec_interval="15m", progress=True):
+def load_history(symbols, days, exec_interval="15m", progress=True, data_url=None):
     """Signal-ийн 1h лаа, гарц шийдэх нарийн лаа, funding түүх.
 
     Гарцыг 1h лаан дээр шийдэх нь хамгийн том худал эх сурвалж: нэг лаанд
@@ -87,24 +107,24 @@ def load_history(symbols, days, exec_interval="15m", progress=True):
     now_ms = binance_client.current_timestamp_ms()
     # Warmup: signal цонх (600 лаа) + туршилтын хугацаа
     start_ms = now_ms - (days * 24 + SIGNAL_WINDOW + 24) * HOUR_MS
-
     data = {}
-    for n, symbol in enumerate(symbols, 1):
-        if progress:
-            log.info(f"📥 [{n}/{len(symbols)}] {symbol} өгөгдөл татаж байна...")
-        signal_df = market_data.get_klines_range(symbol, "1h", start_ms, now_ms)
-        if len(signal_df) < SIGNAL_WINDOW + 48:
-            log.warning(f"⚠️ {symbol}: хангалттай түүх алга ({len(signal_df)} лаа) — алгаслаа")
-            continue
-        exec_df = market_data.get_klines_range(symbol, exec_interval, start_ms, now_ms)
-        funding = market_data.get_funding_history(symbol, start_ms, now_ms) if FUNDING_ENABLED else []
-        data[symbol] = {
-            "signal": signal_df,
-            "exec": exec_df if len(exec_df) else signal_df,
-            "exec_interval": exec_interval if len(exec_df) else "1h",
-            "funding": funding,
-            "close_by_time": dict(zip(signal_df["time"], signal_df["close"])),
-        }
+
+    with market_data_source(data_url if data_url is not None else BACKTEST_DATA_URL):
+        for n, symbol in enumerate(symbols, 1):
+            if progress:
+                log.info(f"📥 [{n}/{len(symbols)}] {symbol} өгөгдөл татаж байна...")
+            signal_df = market_data.get_klines_range(symbol, "1h", start_ms, now_ms)
+            if len(signal_df) < SIGNAL_WINDOW + 48:
+                log.warning(f"⚠️ {symbol}: хангалттай түүх алга ({len(signal_df)} лаа) — алгаслаа")
+                continue
+            exec_df = market_data.get_klines_range(symbol, exec_interval, start_ms, now_ms)
+            funding = market_data.get_funding_history(symbol, start_ms, now_ms) if FUNDING_ENABLED else []
+            data[symbol] = {
+                "signal": signal_df,
+                "exec": exec_df if len(exec_df) else signal_df,
+                "exec_interval": exec_interval if len(exec_df) else "1h",
+                "funding": funding,
+            }
     return data
 
 
@@ -694,10 +714,9 @@ def format_report(sim, data=None):
 # CLI
 # ----------------------------------------------------------------
 
-def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress=True):
+def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress=True, data_url=None):
     symbols = symbols or SYMBOLS_POOL
-    market_data.load_exchange_info()
-    data = load_history(symbols, days, exec_interval=exec_interval, progress=progress)
+    data = load_history(symbols, days, exec_interval=exec_interval, progress=progress, data_url=data_url)
     if not data:
         return None, "❌ Өгөгдөл татагдсангүй."
     if start_balance is None:
@@ -743,6 +762,8 @@ def main(argv=None):
     parser.add_argument("--symbols", type=str, default=None, help="таслалаар тусгаарласан symbol-ууд")
     parser.add_argument("--exec-interval", type=str, default="15m",
                         help="гарц шийдэх лааны давтамж (15m/5m). 1h нь хамгийн бүдүүлэг.")
+    parser.add_argument("--data-url", type=str, default=None,
+                        help=f"түүхэн өгөгдлийн эндпойнт (анхдагч: {BACKTEST_DATA_URL})")
     parser.add_argument("--csv", type=str, default=None, help="арилжаа бүрийг CSV-д бичих зам")
     parser.add_argument("--telegram", action="store_true", help="тайланг Telegram руу илгээх")
     args = parser.parse_args(argv)
@@ -751,8 +772,8 @@ def main(argv=None):
     binance_client.sync_server_time()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
-    sim, report = run(days=args.days, start_balance=args.balance,
-                      symbols=symbols, exec_interval=args.exec_interval)
+    sim, report = run(days=args.days, start_balance=args.balance, symbols=symbols,
+                      exec_interval=args.exec_interval, data_url=args.data_url)
     print(report)
 
     if sim and args.csv:

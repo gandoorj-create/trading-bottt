@@ -64,6 +64,7 @@
   "backtest_days": 30,
   "backtest_interval": "1h",
 
+  "backtest_data_url": "https://fapi.binance.com",
   "backtest_fee_rate": 0.0004,
   "backtest_slippage_rate": 0.0002,
   "strategy_state_file": "strategy_state.json",
