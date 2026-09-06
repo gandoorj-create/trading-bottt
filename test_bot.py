@@ -3676,3 +3676,46 @@ class TestBacktestDataSource:
                                   data_url="https://fapi.binance.com")
 
         assert binance_client.BASE_URL == "https://demo-fapi.binance.com"
+
+
+class TestBacktestStateIsolation:
+    """Симуляц ажиллаж буй ботын state-ийг хөндөж болохгүй.
+
+    run_portfolio_backtest нь state.reset() дуудаж, стратегийн статистикийг
+    өөрийнхөөрөө дүүргэдэг. bot.py эхлэхдээ backtest ажиллуулбал энэ нь
+    sync_existing_positions-ийн сая барьсан нээлттэй арилжааны бүртгэл болон
+    drawdown-ы оргилыг устгана — backtest ажиллаж буй ботоо сүйтгэнэ.
+    """
+
+    def test_open_trades_survive_a_simulation(self, synthetic_market):
+        bot_state.active_trade_info["BTCUSDT"] = _trade_info(strategy="MACD_MOMENTUM")
+
+        backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert "BTCUSDT" in bot_state.active_trade_info
+        assert bot_state.active_trade_info["BTCUSDT"]["strategy"] == "MACD_MOMENTUM"
+
+    def test_the_drawdown_high_water_mark_survives(self, synthetic_market):
+        bot_state.session_peak_balance = 8_888.0
+        bot_state.session_realized_pnl = 123.45
+
+        backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert bot_state.session_peak_balance == pytest.approx(8_888.0)
+        assert bot_state.session_realized_pnl == pytest.approx(123.45)
+
+    def test_live_strategy_stats_are_not_polluted_by_simulated_trades(self, synthetic_market):
+        bot_state.strategy_stats["RSI_STRATEGY"]["trades"] = 4
+        bot_state.strategy_stats["RSI_STRATEGY"]["total_pnl"] = 55.0
+
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert sim["trades"]                       # симуляц үнэхээр арилжаа хийсэн
+        assert bot_state.strategy_stats["RSI_STRATEGY"]["trades"] == 4
+        assert bot_state.strategy_stats["RSI_STRATEGY"]["total_pnl"] == pytest.approx(55.0)
+
+    def test_a_safety_lock_is_not_left_behind_by_the_simulation(self, synthetic_market):
+        backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert bot_state.safety_lock is False
+        assert bot_state.drawdown_halt is False

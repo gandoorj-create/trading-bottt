@@ -71,11 +71,18 @@ def market_data_source(url):
 
 @contextmanager
 def simulation_mode(equity_getter):
-    """Telegram, диск, балансын дуудлагыг симуляц руу чиглүүлнэ.
+    """Telegram, диск, баланс ба runtime state-ийг симуляц руу чиглүүлнэ.
 
     Ингэснээр risk.py-ийн жинхэнэ cooldown ба drawdown код backtest дотор
     хэвээрээ ажиллана — дахин бичихгүй тул хэзээ ч салж холбогдохгүй.
+
+    State-ийг заавал тусгаарлана: симуляц нь state.reset() дуудаж, стратегийн
+    статистикийг өөрийнхөөрөө дүүргэдэг. Амьд процесс дотор (bot.py эхлэхэд)
+    үүнийг хийвэл sync_existing_positions-ийн барьсан нээлттэй арилжааны
+    бүртгэл, drawdown-ы оргил утга бүгд устана — өөрөөр хэлбэл backtest нь
+    ажиллаж буй ботоо сүйтгэнэ. Тиймээс бүх атрибутыг хуулж аваад буцаана.
     """
+    state_snapshot = dict(state.__dict__)
     saved = (
         notifications.send_telegram,
         persistence.save_strategy_state,
@@ -91,6 +98,8 @@ def simulation_mode(equity_getter):
     finally:
         (notifications.send_telegram, persistence.save_strategy_state,
          persistence.save_session_state, account.get_usdt_balance) = saved
+        state.__dict__.clear()
+        state.__dict__.update(state_snapshot)
 
 
 # ----------------------------------------------------------------
@@ -432,10 +441,6 @@ def run_portfolio_backtest(data, start_balance, progress=True):
     }
     equity = lambda: start_balance + sim["realized"]
 
-    state.reset()
-    state.session_start_balance = start_balance
-    state.session_peak_balance = start_balance
-
     selection_every = max(1, int(SELECTION_INTERVAL_MINUTES // 60))
     first = SIGNAL_WINDOW
     last = len(master) - 2
@@ -443,6 +448,12 @@ def run_portfolio_backtest(data, start_balance, progress=True):
     cycles = 0
 
     with simulation_mode(equity):
+        # Snapshot аль хэдийн авагдсаны ДАРАА цэвэрлэнэ — эс тэгвээс амьд
+        # ботын state-ийг устгачихаад устсан хувилбарыг нь буцаана.
+        state.reset()
+        state.session_start_balance = start_balance
+        state.session_peak_balance = start_balance
+
         for mi in range(first, last + 1):
             t = master[mi]
             next_t = master[mi + 1]
@@ -553,13 +564,16 @@ def run_portfolio_backtest(data, start_balance, progress=True):
                 done = (mi - first) / max(1, last - first) * 100
                 log.info(f"   ... {done:5.1f}% | equity ${equity() + unreal:,.0f} | арилжаа {len(sim['trades'])}")
 
-    # Үлдсэн позицуудыг сүүлийн үнээр хаана
-    final_t = master[-1]
-    for symbol in list(sim["open"]):
-        pos = sim["open"][symbol]
-        row = _row_at(data[symbol]["signal"], index_by_time[symbol].get(final_t, -1))
-        price = float(row["close"]) if row is not None else pos["entry"]
-        _close_leg(pos, price, pos["qty"], "END_OF_TEST", final_t, sim)
+        # Үлдсэн позицуудыг сүүлийн үнээр хаана. Заавал simulation_mode
+        # ДОТОР — _close_leg нь risk.update_strategy_performance дуудаж
+        # стратегийн статистикт бичдэг тул гадна нь бол амьд ботын
+        # тоонуудыг симуляцын арилжаагаар бохирдуулна.
+        final_t = master[-1]
+        for symbol in list(sim["open"]):
+            pos = sim["open"][symbol]
+            row = _row_at(data[symbol]["signal"], index_by_time[symbol].get(final_t, -1))
+            price = float(row["close"]) if row is not None else pos["entry"]
+            _close_leg(pos, price, pos["qty"], "END_OF_TEST", final_t, sim)
 
     sim["start_balance"] = start_balance
     sim["final_balance"] = equity()
