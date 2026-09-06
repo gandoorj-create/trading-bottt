@@ -134,6 +134,93 @@ def get_klines(symbol, interval="1h", limit=200, drop_unclosed=True):
     return df
 
 
+INTERVAL_MS = {
+    "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+    "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000, "1d": 86_400_000,
+}
+
+
+def _klines_page(symbol, interval, start_ms, end_ms, limit=1500):
+    return binance_client.send_public_request("/fapi/v1/klines", {
+        "symbol": symbol, "interval": interval,
+        "startTime": int(start_ms), "endTime": int(end_ms), "limit": limit,
+    })
+
+
+def get_klines_range(symbol, interval, start_ms, end_ms, max_bars=100_000):
+    """Түүхэн лааг хуудаслаж татна.
+
+    /fapi/v1/klines нэг удаад 1500 мөр өгдөг тул backtest-д хэрэгтэй хэдэн
+    мянган лааг хэсэгчлэн авч холбоно. Хаагдаагүй сүүлийн лааг ХАСНА —
+    get_klines-тай ижил зарчим, эс тэгвээс backtest хөдөлж байгаа лаанаас
+    signal гаргаж repainting хийнэ.
+    """
+    step = INTERVAL_MS.get(interval)
+    if not step:
+        raise ValueError(f"Тодорхойгүй interval: {interval}")
+
+    rows = []
+    cursor = int(start_ms)
+    end_ms = int(end_ms)
+    while cursor < end_ms and len(rows) < max_bars:
+        page = _klines_page(symbol, interval, cursor, end_ms)
+        if not isinstance(page, list):
+            raise ValueError(f"Kline range error {symbol} {interval}: {page}")
+        if not page:
+            break
+        rows.extend(page)
+        last_open = int(page[-1][0])
+        if last_open + step <= cursor:
+            break
+        cursor = last_open + step
+        if len(page) < 1500:
+            break
+
+    if not rows:
+        return pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
+
+    columns = [
+        "time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "number_of_trades",
+        "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore",
+    ]
+    df = pd.DataFrame(rows, columns=columns)
+    df["time"] = df["time"].astype("int64")
+    for col in ("open", "high", "low", "close", "volume"):
+        df[col] = df[col].astype(float)
+    df = df.drop_duplicates(subset="time").sort_values("time").reset_index(drop=True)
+    # Хаагдсан лаа л үлдээнэ
+    now_ms = binance_client.current_timestamp_ms()
+    df = df[df["time"] + step <= now_ms].reset_index(drop=True)
+    return df[["time", "open", "high", "low", "close", "volume"]]
+
+
+def get_funding_history(symbol, start_ms, end_ms):
+    """8 цаг тутмын бодит funding хувь (time_ms, rate) жагсаалт.
+
+    Backtest-д зайлшгүй: 6 позиц 5x-ээр барихад funding сард балансын ~2%
+    иддэг бөгөөд энэ нь ашигтай/алдагдалтай эсэхийг шийдэх хэмжээний дүн.
+    """
+    out = []
+    cursor = int(start_ms)
+    end_ms = int(end_ms)
+    while cursor < end_ms:
+        page = binance_client.send_public_request("/fapi/v1/fundingRate", {
+            "symbol": symbol, "startTime": cursor, "endTime": end_ms, "limit": 1000,
+        })
+        if not isinstance(page, list) or not page:
+            break
+        for item in page:
+            out.append((int(item["fundingTime"]), utils.safe_float(item.get("fundingRate"), 0.0)))
+        last = int(page[-1]["fundingTime"])
+        if last <= cursor:
+            break
+        cursor = last + 1
+        if len(page) < 1000:
+            break
+    return sorted(set(out))
+
+
 def find_strong_levels(df, lookback=100):
     """Сүүлийн `lookback` лааны swing доод/дээд түвшин.
 

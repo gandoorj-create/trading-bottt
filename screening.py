@@ -52,7 +52,116 @@ def calculate_correlation(symbol1, symbol2, lookback=50):
         return 0.0
 
 
+def analyze_frame(symbol, df, mtf_signal, funding_rate):
+    """Лаа + гадаад контекстээс signal ба оноо гаргах ЦЭВЭР тооцоо.
+
+    Сүлжээнд огт хандахгүй. Live (analyze_coin) ба backtest хоёулаа яг энэ
+    функцээр дамждаг тул хоёрын шийдвэр гарцаагүй ижил байна — backtest нь
+    ботоос өөр стратеги турших боломжгүй болно.
+    """
+    close = df["close"].iloc[-1]
+    if close <= 0:
+        log.warning(f"⚠️ {symbol}: үнэ 0 ирлээ — алгаслаа")
+        return None
+
+    adx = indicators.calculate_adx(df).iloc[-1]
+    rsi = indicators.calculate_rsi(df).iloc[-1]
+    atr = indicators.calculate_atr(df).iloc[-1]
+    atr_pct = atr / close * 100
+    ema20 = indicators.calculate_ema(df, 20)
+    ema50 = indicators.calculate_ema(df, 50)
+    ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
+    volume_ratio = indicators.calculate_volume_ratio(df)
+    
+    chop = indicators.calculate_chop(df, CHOP_PERIOD).iloc[-1]
+    vwap = indicators.calculate_vwap(df).iloc[-1]
+    
+    
+    support, resistance = market_data.find_strong_levels(df)
+    if support and resistance:
+        log.info(f"🔹 {symbol} Support: {support:.6g} | Resistance: {resistance:.6g}")
+    
+    sentiment = 0.0
+    if funding_rate > strategies.FUNDING_SENTIMENT_THRESHOLD:
+        sentiment -= 0.5
+    elif funding_rate < -strategies.FUNDING_SENTIMENT_THRESHOLD:
+        sentiment += 0.5
+    
+    regime = strategies.determine_regime(chop, adx, ema_slope, atr_pct)
+
+    strategy_results = {}
+    for strategy in STRATEGY_NAMES:
+        if not state.strategy_stats[strategy]["active"]:
+            continue
+        score = strategies.calculate_strategy_score(
+            strategy, adx, rsi, atr_pct, volume_ratio, 
+            ema_slope, sentiment, regime, chop, mtf_signal
+        )
+        signal = strategies.generate_strategy_signal(strategy, df, sentiment, regime, chop)
+        
+        # TREND_FOLLOWING нь 4h макро тренд дээр шийддэг тул энэ 1h шалгалт
+        # орох мөчийг тааруулах үүрэгтэй: макро өсөлт заасан ч 1h EMA20
+        # EMA50-аас доогуур байвал ойрын хугацааны хөдөлгөөн эсрэг байна
+        # гэсэн үг — хүлээнэ. Давхардсан шалгалт биш, өөр давхрага.
+        if signal == "BUY" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] < ema50.iloc[-1]:
+            signal = "HOLD"
+        if signal == "SELL" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] > ema50.iloc[-1]:
+            signal = "HOLD"
+
+        # Өндөр давтамжийн trend-ийн эсрэг арилжаа хийхгүй. Өмнө нь MTF нь
+        # тодорхойгүй coin-ыг хаядаг байсан ч эсрэг чиглэлийн арилжааг
+        # саадгүй нэвтрүүлдэг байсан — санаанаасаа эсрэг ажиллаж байв.
+        if MTF_ENABLED:
+            if mtf_signal == "BULLISH" and signal == "SELL":
+                signal = "HOLD"
+            elif mtf_signal == "BEARISH" and signal == "BUY":
+                signal = "HOLD"
+
+        # Оноогоор таслахаас өмнөх чиглэлийг хадгална. Үүнгүйгээр
+        # screen_coins дахь "оноо хэт бага" диагностик BUY/SELL хайдаг
+        # мөртлөө HOLD-той тулгардаг тул хэзээ ч юу ч мэдээлдэггүй байв.
+        raw_signal = signal
+        if score < MIN_SIGNAL_SCORE:
+            signal = "HOLD"
+
+        strategy_results[strategy] = {
+            "strategy": strategy,
+            "symbol": symbol,
+            "price": close,
+            "score": score,
+            "signal": signal,
+            "raw_signal": raw_signal,
+            "adx": adx,
+            "rsi": rsi,
+            "atr_pct": atr_pct,
+            "volume_ratio": volume_ratio,
+            "ema_slope": ema_slope,
+            "regime": regime,
+            "sentiment": sentiment,
+            "chop": chop,
+            "vwap": vwap,
+            "funding": funding_rate,
+            "mtf": mtf_signal
+        }
+    return {
+        "symbol": symbol,
+        "price": close,
+        "adx": adx,
+        "rsi": rsi,
+        "atr_pct": atr_pct,
+        "volume_ratio": volume_ratio,
+        "ema_slope": ema_slope,
+        "regime": regime,
+        "chop": chop,
+        "vwap": vwap,
+        "funding": funding_rate,
+        "mtf": mtf_signal,
+        "strategies": strategy_results
+    }
+
+
 def analyze_coin(symbol, check_correlation=True, active_symbols=None):
+    """Live зам: өгөгдлөө татаад analyze_frame руу дамжуулна."""
     try:
         # 600 хаагдсан лаа: 1h EMA-200-д (260 хангалттай байсан) төдийгүй
         # TREND_FOLLOWING-ийн 4h EMA-100-д ч хүрэлцэнэ — 600 / 4 = 150 4h лаа.
@@ -77,125 +186,21 @@ def analyze_coin(symbol, check_correlation=True, active_symbols=None):
                     log.info(f"🔴 SKIPPED {symbol}: Correlation with {sym} = {corr:.2f}")
                     return None
 
-        close = df["close"].iloc[-1]
-        if close <= 0:
-            log.warning(f"⚠️ {symbol}: үнэ 0 ирлээ — алгаслаа")
-            return None
-
-        adx = indicators.calculate_adx(df).iloc[-1]
-        rsi = indicators.calculate_rsi(df).iloc[-1]
-        atr = indicators.calculate_atr(df).iloc[-1]
-        atr_pct = atr / close * 100
-        ema20 = indicators.calculate_ema(df, 20)
-        ema50 = indicators.calculate_ema(df, 50)
-        ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
-        volume_ratio = indicators.calculate_volume_ratio(df)
-        
-        chop = indicators.calculate_chop(df, CHOP_PERIOD).iloc[-1]
-        vwap = indicators.calculate_vwap(df).iloc[-1]
-        funding_rate = market_data.get_funding_rate(symbol)
-        
-        support, resistance = market_data.find_strong_levels(df)
-        if support and resistance:
-            log.info(f"🔹 {symbol} Support: {support:.6g} | Resistance: {resistance:.6g}")
-        
-        sentiment = 0.0
-        if funding_rate > strategies.FUNDING_SENTIMENT_THRESHOLD:
-            sentiment -= 0.5
-        elif funding_rate < -strategies.FUNDING_SENTIMENT_THRESHOLD:
-            sentiment += 0.5
-        
-        regime = strategies.determine_regime(chop, adx, ema_slope, atr_pct)
-
-        strategy_results = {}
-        for strategy in STRATEGY_NAMES:
-            if not state.strategy_stats[strategy]["active"]:
-                continue
-            score = strategies.calculate_strategy_score(
-                strategy, adx, rsi, atr_pct, volume_ratio, 
-                ema_slope, sentiment, regime, chop, mtf_signal
-            )
-            signal = strategies.generate_strategy_signal(strategy, df, sentiment, regime, chop)
-            
-            # TREND_FOLLOWING нь 4h макро тренд дээр шийддэг тул энэ 1h шалгалт
-            # орох мөчийг тааруулах үүрэгтэй: макро өсөлт заасан ч 1h EMA20
-            # EMA50-аас доогуур байвал ойрын хугацааны хөдөлгөөн эсрэг байна
-            # гэсэн үг — хүлээнэ. Давхардсан шалгалт биш, өөр давхрага.
-            if signal == "BUY" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] < ema50.iloc[-1]:
-                signal = "HOLD"
-            if signal == "SELL" and strategy == "TREND_FOLLOWING" and ema20.iloc[-1] > ema50.iloc[-1]:
-                signal = "HOLD"
-
-            # Өндөр давтамжийн trend-ийн эсрэг арилжаа хийхгүй. Өмнө нь MTF нь
-            # тодорхойгүй coin-ыг хаядаг байсан ч эсрэг чиглэлийн арилжааг
-            # саадгүй нэвтрүүлдэг байсан — санаанаасаа эсрэг ажиллаж байв.
-            if MTF_ENABLED:
-                if mtf_signal == "BULLISH" and signal == "SELL":
-                    signal = "HOLD"
-                elif mtf_signal == "BEARISH" and signal == "BUY":
-                    signal = "HOLD"
-
-            # Оноогоор таслахаас өмнөх чиглэлийг хадгална. Үүнгүйгээр
-            # screen_coins дахь "оноо хэт бага" диагностик BUY/SELL хайдаг
-            # мөртлөө HOLD-той тулгардаг тул хэзээ ч юу ч мэдээлдэггүй байв.
-            raw_signal = signal
-            if score < MIN_SIGNAL_SCORE:
-                signal = "HOLD"
-
-            strategy_results[strategy] = {
-                "strategy": strategy,
-                "symbol": symbol,
-                "price": close,
-                "score": score,
-                "signal": signal,
-                "raw_signal": raw_signal,
-                "adx": adx,
-                "rsi": rsi,
-                "atr_pct": atr_pct,
-                "volume_ratio": volume_ratio,
-                "ema_slope": ema_slope,
-                "regime": regime,
-                "sentiment": sentiment,
-                "chop": chop,
-                "vwap": vwap,
-                "funding": funding_rate,
-                "mtf": mtf_signal
-            }
-        return {
-            "symbol": symbol,
-            "price": close,
-            "adx": adx,
-            "rsi": rsi,
-            "atr_pct": atr_pct,
-            "volume_ratio": volume_ratio,
-            "ema_slope": ema_slope,
-            "regime": regime,
-            "chop": chop,
-            "vwap": vwap,
-            "funding": funding_rate,
-            "mtf": mtf_signal,
-            "strategies": strategy_results
-        }
+        return analyze_frame(symbol, df, mtf_signal, market_data.get_funding_rate(symbol))
     except Exception as e:
         log.error(f"❌ analyze_coin {symbol}: {e}")
         return None
 
 
-def screen_coins():
-    log.info("\n" + "=" * 70)
-    log.info(f"🔍 MARKET SCREENING {datetime.now().strftime('%H:%M:%S')}")
-    log.info("=" * 70)
+def pick_candidates(analyses, correlation_fn):
+    """Шинжилгээнүүдээс нээх позицуудыг сонгоно (ЦЭВЭР логик).
 
-    skipped_reasons = []
+    Live ба backtest хоёулаа энэ функцийг дуудна. correlation_fn нь цорын ганц
+    гадаад хамаарал — live дээр кэштэй сүлжээний дуудлага, backtest дээр
+    түүхэн өгөгдлөөс урьдчилан тооцсон утга.
 
-    current_positions = account.get_positions()
-    active_symbols = {p["symbol"] for p in current_positions}
-    analyses = []
-    for symbol in SYMBOLS_POOL:
-        result = analyze_coin(symbol, check_correlation=True, active_symbols=active_symbols)
-        if result:
-            analyses.append(result)
-
+    Буцаана: (сонгогдсон, корреляциар хасагдсан symbol, оноо давсан бүх нэр дэвшигч)
+    """
     strategy_candidates = []
     for strategy in STRATEGY_NAMES:
         if not state.strategy_stats[strategy]["active"]:
@@ -235,32 +240,50 @@ def screen_coins():
     # байрнаас нь шахаж гаргадаг байв.
     unique_candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    if CORRELATION_ENABLED:
-        final_selected = []
-        removed_by_correlation = []
-        for coin in unique_candidates:
-            # ЗӨВХӨН сонгогдсонтой харьцуулна. Өмнө нь бүх өмнөх нэр дэвшигчтэй
-            # харьцуулдаг байсан тул хасагдсан coin өөрөө бусдыг хасах чадвартай
-            # хэвээр үлдэж, гинжин урвал үүсгэдэг байв: A-B хамааралтай, B-C
-            # хамааралтай атлаа A-C хамааралгүй байхад C ч хасагддаг.
-            clash = None
-            for kept in final_selected:
-                corr = calculate_correlation_cached(coin["symbol"], kept["symbol"], CORRELATION_LOOKBACK)
-                if abs(corr) > CORRELATION_THRESHOLD:
-                    clash = kept["symbol"]
-                    break
-            if clash:
-                removed_by_correlation.append(coin["symbol"])
-                log.info(f"🔴 REMOVED {coin['symbol']}: high correlation with {clash}")
-                continue
-            final_selected.append(coin)
-            if len(final_selected) >= MAX_SELECTIONS:
+    if not CORRELATION_ENABLED:
+        return unique_candidates[:MAX_SELECTIONS], [], strategy_candidates
+
+    final_selected = []
+    removed_by_correlation = []
+    for coin in unique_candidates:
+        # ЗӨВХӨН сонгогдсонтой харьцуулна. Өмнө нь бүх өмнөх нэр дэвшигчтэй
+        # харьцуулдаг байсан тул хасагдсан coin өөрөө бусдыг хасах чадвартай
+        # хэвээр үлдэж, гинжин урвал үүсгэдэг байв: A-B хамааралтай, B-C
+        # хамааралтай атлаа A-C хамааралгүй байхад C ч хасагддаг.
+        clash = None
+        for kept in final_selected:
+            corr = correlation_fn(coin["symbol"], kept["symbol"], CORRELATION_LOOKBACK)
+            if abs(corr) > CORRELATION_THRESHOLD:
+                clash = kept["symbol"]
                 break
-        selected = final_selected
-        if removed_by_correlation:
-            skipped_reasons.append(f"🔗 Корреляциас хасагдсан: {', '.join(removed_by_correlation)}")
-    else:
-        selected = unique_candidates[:MAX_SELECTIONS]
+        if clash:
+            removed_by_correlation.append(coin["symbol"])
+            log.info(f"🔴 REMOVED {coin['symbol']}: high correlation with {clash}")
+            continue
+        final_selected.append(coin)
+        if len(final_selected) >= MAX_SELECTIONS:
+            break
+    return final_selected, removed_by_correlation, strategy_candidates
+
+
+def screen_coins():
+    log.info("\n" + "=" * 70)
+    log.info(f"🔍 MARKET SCREENING {datetime.now().strftime('%H:%M:%S')}")
+    log.info("=" * 70)
+
+    skipped_reasons = []
+
+    current_positions = account.get_positions()
+    active_symbols = {p["symbol"] for p in current_positions}
+    analyses = []
+    for symbol in SYMBOLS_POOL:
+        result = analyze_coin(symbol, check_correlation=True, active_symbols=active_symbols)
+        if result:
+            analyses.append(result)
+
+    selected, removed_by_correlation, strategy_candidates = pick_candidates(analyses, calculate_correlation_cached)
+    if removed_by_correlation:
+        skipped_reasons.append(f"🔗 Корреляциас хасагдсан: {', '.join(removed_by_correlation)}")
 
     total_balance = account.get_usdt_balance()
     positions = account.get_positions()

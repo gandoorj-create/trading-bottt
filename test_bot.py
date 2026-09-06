@@ -3226,3 +3226,378 @@ class TestNewsWindowScope:
         position_manager.monitor_positions()
 
         assert monitor_env == ["BTCUSDT"]      # хаагдсаныг илрүүлж бүртгэсэн
+
+
+# ----------------------------------------------------------------
+# Backtest: биржийн биелэлтийн дуураймал
+#
+# Энэ бол хамгийн эмзэг хэсэг — лаан доторх замыг мэдэхгүй тул дүрэм нь
+# консерватив байх ёстой. Эсрэг тохиолдолд backtest нь бодит бус сайхан
+# тоо гаргаж, шийдвэрийг эндүүрүүлнэ.
+# ----------------------------------------------------------------
+
+import backtest
+
+
+def _bar(o, h, l, c, t=0):
+    return {"time": t, "open": o, "high": h, "low": l, "close": c, "volume": 1.0}
+
+
+def _sim():
+    return {"open": {}, "trades": [], "realized": 0.0, "total_gross": 0.0,
+            "total_fees": 0.0, "total_funding": 0.0, "equity_curve": [], "pending": []}
+
+
+def _bt_pos(side="BUY", entry=100.0, qty=10.0, sl=3.0, tp=4.5, partial=2.0, trail=3.0):
+    sign = 1 if side == "BUY" else -1
+    return {
+        "symbol": "BTCUSDT", "strategy": "RSI_STRATEGY", "side": side,
+        "entry": entry, "qty": qty, "margin": entry * qty / 5,
+        "levels": {"sl": sl, "tp": tp, "partial": partial, "trail": trail},
+        "score": 20.0, "regime": "TRENDING", "atr_pct": 1.5,
+        "stop_price": entry * (1 - sign * sl / 100),
+        "tp_price": entry * (1 + sign * tp / 100),
+        "partial_price": entry * (1 + sign * partial / 100),
+        "trail_activation": entry * (1 + sign * trail / 100),
+        "partial_done": False, "breakeven_done": False,
+        "trail_armed": False, "trail_extreme": entry, "pending_breakeven": None,
+        "opened_ms": 0, "gross": 0.0, "fees": 0.0, "funding": 0.0,
+    }
+
+
+@pytest.fixture
+def no_costs(monkeypatch):
+    """Биелэлтийн үнийг цэвэр харахын тулд шимтгэл/slippage-г тэглэнэ."""
+    patch_setting(monkeypatch, "BACKTEST_FEE_RATE", 0.0)
+    patch_setting(monkeypatch, "BACKTEST_SLIPPAGE_RATE", 0.0)
+    patch_setting(monkeypatch, "PARTIAL_TP_RATIO", 0.5)
+    patch_setting(monkeypatch, "BREAKEVEN_OFFSET_PCT", 0.1)
+    patch_setting(monkeypatch, "TRAILING_CALLBACK_RATE", 1.0)
+
+
+class TestBacktestFills:
+    def test_stop_fills_at_the_stop_when_the_bar_reaches_it(self, no_costs):
+        sim, pos = _sim(), _bt_pos()
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 100.5, 96.5, 98), sim)
+
+        assert sim["trades"][0]["exit_reason"] == "STOP_LOSS"
+        assert sim["trades"][0]["gross"] == pytest.approx((97.0 - 100.0) * 10)
+
+    def test_a_gap_through_the_stop_fills_at_the_open_not_the_stop(self, no_costs):
+        # Цоорхойг үл тоовол backtest алдагдлаа бодит бусаар багасгана
+        sim, pos = _sim(), _bt_pos()
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(94, 95, 93, 94.5), sim)
+
+        assert sim["trades"][0]["gross"] == pytest.approx((94.0 - 100.0) * 10)
+
+    def test_a_bar_touching_both_stop_and_target_resolves_as_the_stop(self, no_costs):
+        sim, pos = _sim(), _bt_pos()
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 106, 96, 101), sim)
+
+        assert sim["trades"][0]["exit_reason"] == "STOP_LOSS"
+
+    def test_take_profit_fills_when_only_the_upside_is_touched(self, no_costs):
+        sim, pos = _sim(), _bt_pos()
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 106, 99.5, 105), sim)
+
+        # Эхлээд partial (102), дараа нь үлдсэн нь TP (104.5)
+        assert sim["trades"][0]["exit_reason"] == "TAKE_PROFIT"
+        assert sim["trades"][0]["gross"] == pytest.approx(5 * 2.0 + 5 * 4.5)
+
+    def test_partial_fill_leaves_the_rest_open(self, no_costs):
+        sim, pos = _sim(), _bt_pos()
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 102.5, 99.5, 102), sim)
+
+        assert sim["trades"] == []
+        assert pos["qty"] == pytest.approx(5.0)
+        assert pos["partial_done"] is True
+
+    def test_breakeven_takes_effect_only_on_the_next_bar(self, no_costs):
+        # Амьд бот partial биелэлтийг дараагийн мониторингийн мөчлөгт л хардаг.
+        # Тэр саатлыг үл тоовол backtest бодит бусаар олон удаа breakeven-д гарна.
+        sim, pos = _sim(), _bt_pos()
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 102.5, 99.9, 100.5), sim)
+        assert pos["stop_price"] == pytest.approx(97.0)     # хараахан зөөгөөгүй
+
+        backtest.advance_position(pos, _bar(100.5, 101, 100.2, 100.4), sim)
+        assert pos["stop_price"] == pytest.approx(100.1)
+
+    def test_trailing_cannot_arm_and_fire_inside_one_bar(self, no_costs):
+        sim, pos = _sim(), _bt_pos(partial=99.0)   # partial-ыг хүрэхгүй болгов
+        pos["partial_price"] = None
+        sim["open"]["BTCUSDT"] = pos
+
+        # 103-т хүрч arm болох ч тэр дороо 102 руу буусан — гарах ёсгүй
+        backtest.advance_position(pos, _bar(100, 103.2, 101.9, 102), sim)
+
+        assert sim["trades"] == []
+        assert pos["trail_armed"] is True
+
+    def test_trailing_exits_from_the_extreme_on_a_later_bar(self, no_costs):
+        sim, pos = _sim(), _bt_pos()
+        pos["partial_price"] = None
+        pos["trail_armed"] = True
+        pos["trail_extreme"] = 104.0
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(103.5, 103.6, 102.0, 102.5), sim)
+
+        assert sim["trades"][0]["exit_reason"] == "TRAILING"
+        assert sim["trades"][0]["gross"] == pytest.approx((104.0 * 0.99 - 100.0) * 10)
+
+    def test_the_nearer_stop_triggers_first_on_the_way_down(self, no_costs):
+        # Trailing stop (102.96) нь breakeven stop (100.1)-ээс дээр тул
+        # уналтад эхэлж тааралдана — таамаг биш, физик.
+        sim, pos = _sim(), _bt_pos()
+        pos["partial_price"] = None
+        pos["stop_price"] = 100.1
+        pos["breakeven_done"] = True
+        pos["trail_armed"] = True
+        pos["trail_extreme"] = 104.0
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(103.5, 103.6, 99.0, 99.5), sim)
+
+        assert sim["trades"][0]["exit_reason"] == "TRAILING"
+
+    def test_short_stop_sits_above_entry(self, no_costs):
+        sim, pos = _sim(), _bt_pos(side="SELL")
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 103.5, 99.5, 103), sim)
+
+        assert sim["trades"][0]["exit_reason"] == "STOP_LOSS"
+        assert sim["trades"][0]["gross"] == pytest.approx((100.0 - 103.0) * 10)
+
+    def test_short_take_profit_sits_below_entry(self, no_costs):
+        sim, pos = _sim(), _bt_pos(side="SELL")
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 100.5, 94, 95), sim)
+
+        assert sim["trades"][0]["exit_reason"] == "TAKE_PROFIT"
+        assert sim["trades"][0]["gross"] == pytest.approx(5 * 2.0 + 5 * 4.5)
+
+
+class TestBacktestCosts:
+    def test_slippage_always_works_against_the_trade(self, monkeypatch):
+        patch_setting(monkeypatch, "BACKTEST_SLIPPAGE_RATE", 0.001)
+        patch_setting(monkeypatch, "BACKTEST_FEE_RATE", 0.0)
+        sim, pos = _sim(), _bt_pos()
+        pos["partial_price"] = None
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 100.2, 96.5, 97), sim)
+
+        # Long гарахдаа 97.0 биш, түүнээс ДООГУУР биелнэ
+        assert sim["trades"][0]["gross"] < (97.0 - 100.0) * 10
+
+    def test_every_leg_pays_a_fee(self, monkeypatch):
+        patch_setting(monkeypatch, "BACKTEST_FEE_RATE", 0.0004)
+        patch_setting(monkeypatch, "BACKTEST_SLIPPAGE_RATE", 0.0)
+        patch_setting(monkeypatch, "PARTIAL_TP_RATIO", 0.5)
+        sim, pos = _sim(), _bt_pos()
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 106, 99.5, 105), sim)
+
+        # partial (5 @ 102) + үлдсэн (5 @ 104.5)
+        assert sim["trades"][0]["fees"] == pytest.approx((5 * 102 + 5 * 104.5) * 0.0004)
+
+    def test_the_entry_leg_pays_its_own_fee(self, monkeypatch):
+        # Орох шимтгэл нь нийт зардлын тал хувь — үүнийг мартвал backtest
+        # системтэйгээр арилжаа тутамд 0.04% илүү ашигтай харагдана.
+        patch_setting(monkeypatch, "BACKTEST_FEE_RATE", 0.0004)
+        patch_setting(monkeypatch, "BACKTEST_SLIPPAGE_RATE", 0.0)
+        patch_setting(monkeypatch, "ATR_RISK_SIZING_ENABLED", False)
+        patch_setting(monkeypatch, "TRADE_ALLOCATION", 0.09)
+        patch_setting(monkeypatch, "LEVERAGE", 5)
+        sim = _sim()
+
+        pos = backtest._open_position(sim, _coin(price=100.0), _bar(100, 101, 99, 100.5),
+                                      equity=10_000.0, margin_used=0.0)
+
+        # маржин 900 × 5 = notional 4500 → шимтгэл 4500 × 0.0004 = 1.80
+        assert pos["fees"] == pytest.approx(1.80)
+        assert sim["total_fees"] == pytest.approx(1.80)
+        assert sim["realized"] == pytest.approx(-1.80)
+
+    def test_entry_slippage_also_works_against_the_trade(self, monkeypatch):
+        patch_setting(monkeypatch, "BACKTEST_SLIPPAGE_RATE", 0.001)
+        patch_setting(monkeypatch, "BACKTEST_FEE_RATE", 0.0)
+
+        long_pos = backtest._open_position(_sim(), _coin(signal="BUY"), _bar(100, 101, 99, 100.5),
+                                           equity=10_000.0, margin_used=0.0)
+        short_pos = backtest._open_position(_sim(), _coin(signal="SELL"), _bar(100, 101, 99, 100.5),
+                                            equity=10_000.0, margin_used=0.0)
+
+        assert long_pos["entry"] == pytest.approx(100.1)    # долгүй үнээр биш, илүү үнэтэй
+        assert short_pos["entry"] == pytest.approx(99.9)    # short нь илүү хямдаар зарна
+
+    def test_net_is_gross_minus_every_cost(self, monkeypatch):
+        patch_setting(monkeypatch, "BACKTEST_FEE_RATE", 0.0004)
+        sim, pos = _sim(), _bt_pos()
+        pos["partial_price"] = None
+        pos["funding"] = 1.25
+        sim["open"]["BTCUSDT"] = pos
+
+        backtest.advance_position(pos, _bar(100, 100.2, 96.5, 97), sim)
+
+        trade = sim["trades"][0]
+        assert trade["net"] == pytest.approx(trade["gross"] - trade["fees"] - trade["funding"])
+
+
+# ----------------------------------------------------------------
+# Backtest: портфелийн бүтэн гогцоо
+#
+# Синтетик өгөгдөл дээр эхнээс нь дуустал ажиллуулж, ботын дүрмүүд
+# (слотын тоо, lookahead байхгүй, зардал) хэрэгжиж байгааг батална.
+# ----------------------------------------------------------------
+
+def _wave_frame(bars, base=100.0, period=24, amplitude=0.05, start_ms=0):
+    """RSI-г хоёр туйл руу тогтмол хүргэдэг долгион."""
+    import math
+    rows = []
+    price = base
+    for i in range(bars):
+        price = base * (1 + amplitude * math.sin(2 * math.pi * i / period))
+        nxt = base * (1 + amplitude * math.sin(2 * math.pi * (i + 1) / period))
+        o, c = price, nxt
+        rows.append({
+            "time": start_ms + i * 3_600_000,
+            "open": o, "high": max(o, c) * 1.004, "low": min(o, c) * 0.996,
+            "close": c, "volume": 1000.0 + i,
+        })
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture
+def synthetic_market(monkeypatch):
+    monkeypatch.setattr(backtest, "SIGNAL_WINDOW", 220)
+    patch_setting(monkeypatch, "MTF_ENABLED", False)
+    patch_setting(monkeypatch, "CORRELATION_ENABLED", False)
+    patch_setting(monkeypatch, "SELECTION_INTERVAL_MINUTES", 120)
+    patch_setting(monkeypatch, "MAX_SELECTIONS", 2)
+    patch_setting(monkeypatch, "MIN_SIGNAL_SCORE", 14.0)
+    patch_setting(monkeypatch, "MAX_HOLD_HOURS", 24)
+    patch_setting(monkeypatch, "TARGET_PROFIT", 1e9)     # зорилтод хүрэхгүй
+    patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 0.0)
+    data = {}
+    for n, symbol in enumerate(("BTCUSDT", "ETHUSDT", "SOLUSDT")):
+        df = _wave_frame(320, base=100.0 * (n + 1), period=20 + n * 4)
+        data[symbol] = {"signal": df, "exec": df, "exec_interval": "1h",
+                        "funding": [], "close_by_time": {}}
+    return data
+
+
+class TestBacktestPortfolio:
+    def test_the_engine_runs_end_to_end_and_trades(self, synthetic_market):
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert sim is not None
+        assert len(sim["trades"]) > 0
+        assert sim["cycles"] > 0
+
+    def test_never_more_positions_than_the_slot_limit(self, synthetic_market):
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        events = []
+        for trade in sim["trades"]:
+            events.append((trade["opened_ms"], 1))
+            events.append((trade["closed_ms"], -1))
+        events.sort()
+        concurrent = peak = 0
+        for _, delta in events:
+            concurrent += delta
+            peak = max(peak, concurrent)
+
+        assert peak <= 2
+
+    def test_entries_use_the_next_bar_open_not_the_signal_bar_close(self, monkeypatch, synthetic_market):
+        patch_setting(monkeypatch, "BACKTEST_SLIPPAGE_RATE", 0.0)
+
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        for trade in sim["trades"][:10]:
+            df = synthetic_market[trade["symbol"]]["signal"]
+            row = df[df["time"] == trade["opened_ms"]]
+            assert not row.empty
+            assert trade["entry"] == pytest.approx(float(row["open"].iloc[0]))
+
+    def test_signals_never_see_a_bar_that_has_not_closed(self, monkeypatch, synthetic_market):
+        """Lookahead-ийн шууд шалгуур: шинжилгээнд өгсөн лааны сүүлийн цаг нь
+        шийдвэрийн лаанаас ХЭТЭРЧ болохгүй. Хэтэрвэл backtest ирээдүйг хараад
+        бодит бус сайхан үр дүн гаргана."""
+        seen = []
+        real = screening.analyze_frame
+
+        def spy(symbol, df, mtf_signal, funding_rate):
+            seen.append((symbol, int(df["time"].iloc[-1])))
+            return real(symbol, df, mtf_signal, funding_rate)
+
+        monkeypatch.setattr(screening, "analyze_frame", spy)
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert seen
+        # Арилжаа нээгдсэн бар нь signal барын ДАРААХ бар байх ёстой
+        opened = {t["opened_ms"] for t in sim["trades"]}
+        analysed = {ts for _, ts in seen}
+        assert opened
+        assert all(ts + 3_600_000 in opened or ts not in opened for ts in analysed)
+
+    def test_costs_are_charged_and_reduce_the_result(self, synthetic_market):
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert sim["total_fees"] > 0
+        net = sim["final_balance"] - sim["start_balance"]
+        assert net == pytest.approx(sim["total_gross"] - sim["total_fees"] - sim["total_funding"])
+
+    def test_the_report_renders(self, synthetic_market):
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        report = backtest.format_report(sim, synthetic_market)
+
+        assert "ЗАРДЛЫН ЗАДАРГАА" in report
+        assert "СТРАТЕГИ ТУС БҮР" in report
+        assert "ОНООНЫ БҮЛЭГ" in report
+
+    def test_a_higher_score_threshold_trades_less(self, monkeypatch, synthetic_market):
+        busy = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+        patch_setting(monkeypatch, "MIN_SIGNAL_SCORE", 60.0)
+        picky = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert len(picky["trades"]) < len(busy["trades"])
+
+    def test_atr_settings_reach_the_simulated_stops(self, monkeypatch, synthetic_market):
+        """risk.exit_levels-ийг үнэхээр дуудаж байгаагийн баталгаа."""
+        patch_setting(monkeypatch, "ATR_RISK_SIZING_ENABLED", True)
+        patch_setting(monkeypatch, "ATR_SL_MIN_PCT", 4.0)
+        patch_setting(monkeypatch, "ATR_SL_MAX_PCT", 4.0)
+
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert sim["trades"]
+        assert all(t["sl_pct"] == pytest.approx(4.0) for t in sim["trades"])
+
+    def test_funding_is_charged_to_open_longs(self, monkeypatch, synthetic_market):
+        for symbol, entry in synthetic_market.items():
+            times = list(entry["signal"]["time"])
+            entry["funding"] = [(t, 0.0005) for t in times[::8]]
+
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        longs = [t for t in sim["trades"] if t["side"] == "BUY"]
+        assert longs
+        assert sum(t["funding"] for t in longs) > 0

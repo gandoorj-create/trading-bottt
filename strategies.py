@@ -17,27 +17,39 @@ log = get_logger(__name__)
 FUNDING_SENTIMENT_THRESHOLD = 0.0005
 
 
+def mtf_from_frames(df_4h, df_1h):
+    """Хоёр давтамжийн чиглэл нийлж байгаа эсэх (ЦЭВЭР тооцоо).
+
+    Live нь биржээс 4h лаа татаж, backtest нь 1h-ээс нэгтгэж энд дамжуулна —
+    шийдвэрийн логик нь ганц газарт байх тул хоёр зам салахгүй.
+    """
+    if not MTF_ENABLED:
+        return "NEUTRAL"
+    if df_4h is None or df_1h is None or len(df_4h) < 20 or len(df_1h) < 20:
+        return "NEUTRAL"
+
+    ema_4h = indicators.calculate_ema(df_4h, 50).iloc[-1]
+    close_4h = df_4h["close"].iloc[-1]
+    ema_1h = indicators.calculate_ema(df_1h, 50).iloc[-1]
+    close_1h = df_1h["close"].iloc[-1]
+
+    trend_4h = "BUY" if close_4h > ema_4h else "SELL"
+    trend_1h = "BUY" if close_1h > ema_1h else "SELL"
+
+    if trend_4h == "BUY" and trend_1h == "BUY":
+        return "BULLISH"
+    if trend_4h == "SELL" and trend_1h == "SELL":
+        return "BEARISH"
+    return "NEUTRAL"
+
+
 def get_mtf_signal(symbol):
     if not MTF_ENABLED:
         return "NEUTRAL"
     try:
         df_4h = market_data.get_klines(symbol, "4h", 50)
         df_1h = market_data.get_klines(symbol, "1h", 50)
-        
-        if len(df_4h) < 20 or len(df_1h) < 20:
-            return "NEUTRAL"
-            
-        ema_4h = indicators.calculate_ema(df_4h, 50).iloc[-1]
-        close_4h = df_4h["close"].iloc[-1]
-        ema_1h = indicators.calculate_ema(df_1h, 50).iloc[-1]
-        close_1h = df_1h["close"].iloc[-1]
-        
-        trend_4h = "BUY" if close_4h > ema_4h else "SELL"
-        trend_1h = "BUY" if close_1h > ema_1h else "SELL"
-        
-        if trend_4h == "BUY" and trend_1h == "BUY": return "BULLISH"
-        if trend_4h == "SELL" and trend_1h == "SELL": return "BEARISH"
-        return "NEUTRAL"
+        return mtf_from_frames(df_4h, df_1h)
     except Exception as e:
         log.warning(f"⚠️ MTF error {symbol}: {e}")
         return "NEUTRAL"

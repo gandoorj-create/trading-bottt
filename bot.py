@@ -108,15 +108,15 @@ def main():
     )
 
     if BACKTEST_ENABLED:
+        # Эхлэхэд портфелийн симуляц — ботын ЖИНХЭНЭ шийдвэрийн кодыг түүхэн
+        # лаан дээр ажиллуулж, гарц/хэмжээ/зардлыг бүрэн тооцно. Хэдэн минут
+        # үргэлжилдэг тул анхдагчаар унтраалттай; гараар нь `python backtest.py`
+        # гэж ажиллуулах нь илүү тохиромжтой.
         try:
-            log.info("\n🧪 Running initial backtest for all strategies...")
-            test_symbols = SYMBOLS_POOL[:2]
-            for strategy in STRATEGY_NAMES:
-                for symbol in test_symbols:
-                    report = backtest.run_backtest(symbol, strategy, days=BACKTEST_DAYS, interval=BACKTEST_INTERVAL)
-                    if report and "error" not in report.lower() and "хангалттай" not in report:
-                        notifications.send_telegram(report)
-                    time.sleep(1)
+            log.info("\n🧪 Портфелийн backtest ажиллуулж байна...")
+            _sim, _report = backtest.run(days=BACKTEST_DAYS)
+            log.info("\n" + _report)
+            notifications.send_telegram(f"<pre>{_report[:3500]}</pre>")
         except Exception as e:
             log.error(f"❌ Backtest error: {e}")
 
