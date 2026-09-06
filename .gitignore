@@ -9,3 +9,7 @@ strategy_state.json
 session_state.json
 bot.log
 bot.log.*
+
+# NICE/SAP тулгалт — банкны бодит хуулга, тайланг репод хадгалахгүй
+reconciliation/data/
+reconciliation/reports/

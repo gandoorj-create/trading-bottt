@@ -1,0 +1,24 @@
+{
+  "nice_file": "reconciliation/data/nice_statement.xlsx",
+  "sap_file": "reconciliation/data/sap_statement.xlsx",
+  "output_file": "reconciliation/reports/mismatch_report.xlsx",
+
+  "nice_sheet": 0,
+  "sap_sheet": 0,
+
+  "nice_columns": {
+    "date": "Огноо",
+    "amount": "Дүн",
+    "account": "Дансны дугаар",
+    "ref": "Гүйлгээний дугаар"
+  },
+  "sap_columns": {
+    "date": "Posting Date",
+    "amount": "Amount",
+    "account": "Account",
+    "ref": "Reference"
+  },
+
+  "date_format": null,
+  "amount_decimals": 2
+}
