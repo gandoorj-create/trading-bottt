@@ -8,9 +8,62 @@ from state import state
 import account
 import notifications
 import persistence
+import utils
 from logging_setup import get_logger
 
 log = get_logger(__name__)
+
+
+def exit_levels(atr_pct):
+    """Тухайн coin-ы хэлбэлзэлд тохируулсан гарцын түвшнүүд (%).
+
+    Гарцуудын харьцаа (R-бүтэц) нь config-оос хэвээр гарна: TP нь SL-ийн 1.5
+    дахин, partial TP нь 0.667 дахин гэх мэт. ATR нь зөвхөн бүх бүтцийг нэг
+    дор сунгаж/агшаана. Ингэснээр шинэ тохиргооны товчлуур нэмэгдэхгүй, ATR
+    унтраалттай үед яг өмнөх зан төлөв гарна.
+
+    Тогтмол 3% stop нь тайван coin дээр 6 ATR зайд (бараг хэзээ ч цохихгүй),
+    хэлбэлзэлтэй дээр 1 ATR зайд (байнга цохино) байрладаг — өөрөөр хэлбэл
+    ижил тоо огт ижил утга илэрхийлдэггүй байв.
+    """
+    base = {
+        "sl": EMERGENCY_SL_PCT,
+        "tp": TAKE_PROFIT_PCT,
+        "partial": PARTIAL_TP_PCT,
+        "trail": TRAILING_ACTIVATION_PCT,
+    }
+    if not ATR_RISK_SIZING_ENABLED or EMERGENCY_SL_PCT <= 0:
+        return base
+
+    atr = utils.safe_float(atr_pct, 0.0)
+    if atr <= 0:
+        return base
+
+    sl = min(max(ATR_SL_MULTIPLIER * atr, ATR_SL_MIN_PCT), ATR_SL_MAX_PCT)
+    scale = sl / EMERGENCY_SL_PCT
+    return {
+        "sl": sl,
+        "tp": TAKE_PROFIT_PCT * scale,
+        "partial": PARTIAL_TP_PCT * scale,
+        "trail": TRAILING_ACTIVATION_PCT * scale,
+    }
+
+
+def position_margin(balance, sl_pct):
+    """Stop цохиход балансын тогтмол хувийг алдахаар маржиныг тооцоолно.
+
+    notional * sl = balance * risk  =>  notional = balance * risk / sl
+    Өргөн stop-той (хэлбэлзэлтэй) coin автоматаар бага хэмжээ авна.
+    """
+    if not ATR_RISK_SIZING_ENABLED or LEVERAGE <= 0:
+        return balance * TRADE_ALLOCATION
+    sl = utils.safe_float(sl_pct, 0.0)
+    if sl <= 0:
+        return balance * TRADE_ALLOCATION
+
+    notional = balance * (RISK_PER_TRADE_PCT / 100) / (sl / 100)
+    margin = notional / LEVERAGE
+    return min(max(margin, balance * MIN_TRADE_ALLOCATION), balance * MAX_TRADE_ALLOCATION)
 
 
 def record_realized_pnl(strategy, pnl):

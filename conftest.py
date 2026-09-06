@@ -12,6 +12,7 @@ import backtest
 import binance_client
 import execution
 import indicators
+import journal
 import market_data
 import news
 import notifications
@@ -30,8 +31,8 @@ from state import state as bot_state
 # нэгийг нь солиход бусад нь хуучин утгаараа үлддэг. Тиймээс тухайн нэрийг агуулсан
 # бүх модульд нэгэн зэрэг солино.
 _SETTING_MODULES = (
-    account, backtest, binance_client, execution, indicators, market_data, news,
-    notifications, order_api, persistence, position_manager, reports, risk,
+    account, backtest, binance_client, execution, indicators, journal, market_data,
+    news, notifications, order_api, persistence, position_manager, reports, risk,
     screening, strategies, utils,
 )
 
@@ -88,6 +89,7 @@ def isolated_state_files(monkeypatch, tmp_path):
     """State файлууд tmp директорт бичигдэнэ — репо доторх файл хөндөгдөхгүй."""
     monkeypatch.setattr(persistence, "STRATEGY_STATE_FILE", str(tmp_path / "strategy_state.json"))
     monkeypatch.setattr(persistence, "SESSION_STATE_FILE", str(tmp_path / "session_state.json"))
+    monkeypatch.setattr(journal, "JOURNAL_FILE", str(tmp_path / "trades.csv"))
     return tmp_path
 
 

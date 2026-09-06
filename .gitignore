@@ -9,3 +9,4 @@ strategy_state.json
 session_state.json
 bot.log
 bot.log.*
+trades.csv

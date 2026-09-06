@@ -42,6 +42,28 @@ MAX_CANDIDATES_PER_STRATEGY = _cfg.get("max_candidates_per_strategy", 1)
 TRADE_ALLOCATION = _cfg["trade_allocation"]
 LEVERAGE = _cfg["leverage"]
 
+# ---- ATR-аар эрсдэлээ тэнцүүлсэн хэмжээ ба гарц ----
+# Өмнө нь coin болгон балансын ижил 9%-ийг авдаг байсан: 0.4% ATR-тай BTC ба
+# 2.5% ATR-тай DOGE хоёр ижил хэмжээтэй байхад бодит эрсдэл нь 6 дахин зөрдөг.
+# Одоо stop нь ATR-аас хамаарч сунадаг ба хэмжээ нь "stop цохиход балансын
+# RISK_PER_TRADE_PCT-ийг алдана" гэдгээс урвуугаар тооцогдоно.
+ATR_RISK_SIZING_ENABLED = _cfg.get("atr_risk_sizing_enabled", False)
+RISK_PER_TRADE_PCT = _cfg.get("risk_per_trade_pct", 1.25)
+ATR_SL_MULTIPLIER = _cfg.get("atr_sl_multiplier", 2.0)
+ATR_SL_MIN_PCT = _cfg.get("atr_sl_min_pct", 2.0)
+ATR_SL_MAX_PCT = _cfg.get("atr_sl_max_pct", 5.0)
+# Эрсдэлийн тооцоо ганц coin руу хэт их хөрөнгө хийхээс сэргийлсэн хашлага —
+# 6 позиц зэрэг барих боломж хадгалагдана.
+MIN_TRADE_ALLOCATION = _cfg.get("min_trade_allocation", 0.05)
+MAX_TRADE_ALLOCATION = _cfg.get("max_trade_allocation", 0.13)
+
+# ---- Хугацааны stop ----
+# Чиглэлээ өгөөгүй позиц слот, маржин, funding идсээр байдаг. Тодорхой хугацаа
+# өнгөрөөд TIME_STOP_FLAT_PCT дотор хэвтсэн хэвээр байвал хааж, дараагийн
+# signal-д зай гаргана. Ашигтай яваа позицыг хөндөхгүй.
+MAX_HOLD_HOURS = _cfg.get("max_hold_hours", 0)
+TIME_STOP_FLAT_PCT = _cfg.get("time_stop_flat_pct", 1.0)
+
 TRAILING_CALLBACK_RATE = _cfg["trailing_callback_rate"]
 TRAILING_ACTIVATION_PCT = _cfg["trailing_activation_pct"]
 TAKE_PROFIT_PCT = _cfg["take_profit_pct"]
@@ -89,6 +111,10 @@ BACKTEST_DAYS = _cfg.get("backtest_days", 30)
 BACKTEST_INTERVAL = _cfg.get("backtest_interval", "1h")
 BACKTEST_FEE_RATE = _cfg.get("backtest_fee_rate", 0.0004)
 BACKTEST_SLIPPAGE_RATE = _cfg.get("backtest_slippage_rate", 0.0002)
+# ---- Арилжааны бүртгэл (CSV) ----
+JOURNAL_ENABLED = _cfg.get("journal_enabled", False)
+JOURNAL_FILE = os.path.join(STATE_DIR, _cfg.get("journal_file", "trades.csv"))
+
 STRATEGY_STATE_FILE = os.path.join(STATE_DIR, _cfg.get("strategy_state_file", "strategy_state.json"))
 SESSION_STATE_FILE = os.path.join(STATE_DIR, _cfg.get("session_state_file", "session_state.json"))
 

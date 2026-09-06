@@ -7,6 +7,7 @@ from telegram_format import format_block, format_section, money
 from settings import *
 from state import state, STRATEGY_NAMES
 import account
+import journal
 import market_data
 import notifications
 import order_api
@@ -42,12 +43,15 @@ def sync_existing_positions():
         saved = saved_trades.get(symbol)
         saved_partial_tp = None
         saved_breakeven = False
+        saved_levels = None
         if isinstance(saved, dict) and saved.get("side") == side and saved.get("strategy") in STRATEGY_NAMES:
             strategy = saved["strategy"]
             opened_at = utils.safe_float(saved.get("opened_at"), time.time())
             opened_at_ms = int(utils.safe_float(saved.get("opened_at_ms"), opened_at * 1000))
             saved_partial_tp = saved.get("partial_tp_price")
             saved_breakeven = bool(saved.get("breakeven_done"))
+            if isinstance(saved.get("levels"), dict):
+                saved_levels = saved["levels"]
             log.info(f"🔄 RESTORED {symbol} → strategy={strategy} (хадгалсан бүртгэлээс)")
         else:
             strategy = "RECOVERED"
@@ -72,6 +76,7 @@ def sync_existing_positions():
             "tp_order_id": None,
             "partial_tp_price": saved_partial_tp,
             "breakeven_done": saved_breakeven,
+            "levels": saved_levels,
             "recovered": True
         }
 
@@ -83,13 +88,15 @@ def sync_existing_positions():
             if saved_breakeven:
                 offset = BREAKEVEN_OFFSET_PCT / 100
                 be_stop = entry * (1 + offset) if side == "BUY" else entry * (1 - offset)
-            success, _, _ = rebuild_protection_orders(symbol, side, qty, entry, position_side, stop_price=be_stop)
+            success, _, _ = rebuild_protection_orders(symbol, side, qty, entry, position_side,
+                                                      stop_price=be_stop, levels=saved_levels)
             if not success:
                 state.unprotected_symbols.add(symbol)
                 notifications.send_telegram(format_block("RECOVERED POSITION WITHOUT PROTECTION", "🚨", [("Symbol", symbol)]))
             elif not saved_breakeven:
                 state.active_trade_info[symbol]["partial_tp_price"] = place_partial_tp(
-                    symbol, side, qty, entry, position_side
+                    symbol, side, qty, entry, position_side,
+                    partial_pct=(saved_levels or {}).get("partial")
                 )
         else:
             log.info(f"🔄 RECOVERED POSITION: {symbol} (protected)")
@@ -103,6 +110,7 @@ def finalize_trade(symbol, trade_data):
     opened_at_ms = trade_data.get("opened_at_ms", int(trade_data.get("opened_at", time.time()) * 1000))
     pnl = account.get_trade_realized_pnl(symbol, opened_at_ms)
     risk.record_realized_pnl(strategy, pnl)
+    journal.record_close(symbol, trade_data, pnl)
     log.info(f"🔴 CLOSED {symbol} | Strategy={strategy} | PnL=${pnl:.2f}")
     notifications.send_telegram(
         format_block(
@@ -118,7 +126,7 @@ def finalize_trade(symbol, trade_data):
     return pnl
 
 
-def calculate_trailing_activation(symbol, signal, entry_price):
+def calculate_trailing_activation(symbol, signal, entry_price, trail_pct=None):
     try:
         positions = account.get_positions()
     except account.PositionFetchError as e:
@@ -133,30 +141,37 @@ def calculate_trailing_activation(symbol, signal, entry_price):
             if pos["markPrice"] > 0:
                 mark_price = pos["markPrice"]
             break
+    pct = TRAILING_ACTIVATION_PCT if trail_pct is None else trail_pct
     if signal == "BUY":
-        activation = max(entry_price * (1 + TRAILING_ACTIVATION_PCT / 100), mark_price * 1.001)
+        activation = max(entry_price * (1 + pct / 100), mark_price * 1.001)
     else:
-        activation = min(entry_price * (1 - TRAILING_ACTIVATION_PCT / 100), mark_price * 0.999)
+        activation = min(entry_price * (1 - pct / 100), mark_price * 0.999)
     return market_data.round_price(symbol, activation)
 
 
-def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side, stop_price=None):
+def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side, stop_price=None, levels=None):
     """Symbol дээрх хамгаалалтыг цоо шинээр барина (хуучныг нь цуцлаад).
 
-    stop_price: заасан бол хатуу stop-ыг entry-ээс EMERGENCY_SL_PCT-аар тооцохын
-    оронд яг энэ түвшинд тавина. Хэсэгчилсэн TP биелсний дараа stop-ыг breakeven
-    руу зөөхөд хэрэглэнэ.
+    stop_price: заасан бол хатуу stop-ыг тооцохын оронд яг энэ түвшинд тавина
+    (хэсэгчилсэн TP биелсний дараа breakeven руу зөөхөд).
+    levels: risk.exit_levels-ийн ATR-аар тохируулсан хувиуд. Байхгүй бол
+    config-ийн тогтмол утгууд.
     """
     close_side = "SELL" if side == "BUY" else "BUY"
     if quantity <= 0 or entry_price <= 0:
         return False, None, None
 
+    levels = levels or {}
+    sl_pct = utils.safe_float(levels.get("sl"), EMERGENCY_SL_PCT)
+    tp_pct = utils.safe_float(levels.get("tp"), TAKE_PROFIT_PCT)
+    trail_pct = utils.safe_float(levels.get("trail"), TRAILING_ACTIVATION_PCT)
+
     if side == "BUY":
-        tp_price = market_data.round_price(symbol, entry_price * (1 + TAKE_PROFIT_PCT / 100))
-        emergency_sl_price = market_data.round_price(symbol, entry_price * (1 - EMERGENCY_SL_PCT / 100))
+        tp_price = market_data.round_price(symbol, entry_price * (1 + tp_pct / 100))
+        emergency_sl_price = market_data.round_price(symbol, entry_price * (1 - sl_pct / 100))
     else:
-        tp_price = market_data.round_price(symbol, entry_price * (1 - TAKE_PROFIT_PCT / 100))
-        emergency_sl_price = market_data.round_price(symbol, entry_price * (1 + EMERGENCY_SL_PCT / 100))
+        tp_price = market_data.round_price(symbol, entry_price * (1 - tp_pct / 100))
+        emergency_sl_price = market_data.round_price(symbol, entry_price * (1 + sl_pct / 100))
 
     if stop_price is not None:
         emergency_sl_price = market_data.round_price(symbol, stop_price)
@@ -186,7 +201,7 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
 
     # 3) Trailing stop — best effort. Adds upside capture on top of the hard
     #    stop; failure here is not fatal because the emergency stop is live.
-    activation_price = calculate_trailing_activation(symbol, side, entry_price)
+    activation_price = calculate_trailing_activation(symbol, side, entry_price, trail_pct)
     if activation_price is not None:
         trailing = order_api.place_trailing_stop_order(symbol, close_side, quantity, TRAILING_CALLBACK_RATE, activation_price, position_side)
         if utils.is_api_error(trailing):
@@ -197,7 +212,7 @@ def rebuild_protection_orders(symbol, side, quantity, entry_price, position_side
     return True, tp_price, activation_price
 
 
-def place_partial_tp(symbol, side, quantity, entry_price, position_side):
+def place_partial_tp(symbol, side, quantity, entry_price, position_side, partial_pct=None):
     """Хэсэгчилсэн TP байрлуулж, trigger үнийг нь буцаана (эсвэл None).
 
     Best-effort: бүтэлгүйтсэн ч хатуу SL ба бүтэн TP хэвээр амьд тул арилжааг
@@ -214,10 +229,11 @@ def place_partial_tp(symbol, side, quantity, entry_price, position_side):
     if partial_qty is None or partial_qty <= 0 or partial_qty >= quantity:
         return None
 
+    pct = PARTIAL_TP_PCT if partial_pct is None else utils.safe_float(partial_pct, PARTIAL_TP_PCT)
     if side == "BUY":
-        tp_price = market_data.round_price(symbol, entry_price * (1 + PARTIAL_TP_PCT / 100))
+        tp_price = market_data.round_price(symbol, entry_price * (1 + pct / 100))
     else:
-        tp_price = market_data.round_price(symbol, entry_price * (1 - PARTIAL_TP_PCT / 100))
+        tp_price = market_data.round_price(symbol, entry_price * (1 - pct / 100))
     if tp_price is None:
         return None
 
@@ -238,7 +254,7 @@ def place_partial_tp(symbol, side, quantity, entry_price, position_side):
     if utils.is_api_error(result):
         log.warning(f"⚠️ {symbol}: partial TP байрлуулж чадсангүй ({result}) — бүтэн TP/SL хэвээр")
         return None
-    log.info(f"🎯 PARTIAL TP {symbol}: {partial_qty} @ ${tp_price:,.6f} (+{PARTIAL_TP_PCT}%)")
+    log.info(f"🎯 PARTIAL TP {symbol}: {partial_qty} @ ${tp_price:,.6f} (+{pct:.2f}%)")
     return tp_price
 
 
@@ -260,7 +276,8 @@ def move_stop_to_breakeven(symbol, trade, remaining_qty):
     log.info(f"🟩 PARTIAL TP FILLED {symbol} — үлдсэн {remaining_qty}, stop → breakeven ${be_price:,.6f}")
     success, _, _ = rebuild_protection_orders(
         symbol, side, remaining_qty, entry,
-        trade.get("position_side", "BOTH"), stop_price=be_price
+        trade.get("position_side", "BOTH"), stop_price=be_price,
+        levels=trade.get("levels")
     )
     if not success:
         # breakeven_done-г тэмдэглэхгүй тул дараагийн мөчлөгт дахин оролдоно.
@@ -279,7 +296,7 @@ def move_stop_to_breakeven(symbol, trade, remaining_qty):
     notifications.send_telegram(format_block("ХЭСЭГЧИЛСЭН АШИГ АВЛАА", "🟩", [
         ("Symbol", symbol),
         ("Strategy", trade.get("strategy", "UNKNOWN")),
-        ("Хаасан", f"~{PARTIAL_TP_RATIO * 100:.0f}% @ {PARTIAL_TP_PCT}%"),
+        ("Хаасан", f"~{PARTIAL_TP_RATIO * 100:.0f}%"),
         ("Үлдсэн", remaining_qty),
         ("Stop", f"breakeven ${be_price:,.6f}"),
     ]))
@@ -312,6 +329,55 @@ def check_partial_tp_fills(positions):
             move_stop_to_breakeven(symbol, trade, current)
         except Exception as e:
             log.error(f"❌ Breakeven {symbol}: {e}")
+
+
+def check_time_stops(positions):
+    """Хугацаа дуусаад ч чиглэлээ өгөөгүй позицыг хааж, слот чөлөөлнө.
+
+    Ийм позиц маржин, 6 слотын нэг, funding-ыг идсээр байдаг мөртлөө SL ч TP ч
+    цохихгүй тул өөрөө хэзээ ч дуусахгүй. Ашигтай яваа позицыг хөндөхгүй —
+    түүнийг trailing stop болон TP аль хэдийн хариуцаж байна.
+    """
+    if MAX_HOLD_HOURS <= 0:
+        return
+    now = time.time()
+    for pos in positions:
+        symbol = pos["symbol"]
+        trade = state.active_trade_info.get(symbol)
+        if not trade:
+            continue
+        opened_at = utils.safe_float(trade.get("opened_at"), 0.0)
+        if opened_at <= 0 or (now - opened_at) < MAX_HOLD_HOURS * 3600:
+            continue
+        # Хаах захиалга явуулсны дараа позиц алга болтол хэдэн мөчлөг өнгөрч
+        # болно — 30 секунд тутамд давхар market order цацахгүй.
+        if now - utils.safe_float(trade.get("time_stop_sent_at"), 0.0) < 300:
+            continue
+
+        entry = utils.safe_float(pos.get("entryPrice"), 0.0)
+        mark = utils.safe_float(pos.get("markPrice"), 0.0)
+        if entry <= 0 or mark <= 0:
+            continue
+        move_pct = (mark - entry) / entry * 100
+        if trade.get("side") == "SELL":
+            move_pct = -move_pct
+        if abs(move_pct) > TIME_STOP_FLAT_PCT:
+            continue
+
+        hours = (now - opened_at) / 3600
+        log.info(f"⏱️ TIME STOP {symbol}: {hours:.1f}ц хөдөлгөөнгүй ({move_pct:+.2f}%) — хааж байна")
+        trade["time_stop_sent_at"] = now
+        # exit_reason нь позиц алга болоход finalize_trade → journal руу очно.
+        trade["exit_reason"] = "TIME_STOP"
+        if not close_one_position(pos):
+            continue
+        notifications.send_telegram(format_block("ХУГАЦААНЫ STOP", "⏱️", [
+            ("Symbol", symbol),
+            ("Strategy", trade.get("strategy", "UNKNOWN")),
+            ("Барьсан хугацаа", f"{hours:.1f} цаг"),
+            ("Хөдөлгөөн", f"{move_pct:+.2f}% (±{TIME_STOP_FLAT_PCT}% дотор)"),
+            ("Шалтгаан", "Слот, маржин чөлөөлж дараагийн signal-д зай гаргалаа"),
+        ]))
 
 
 def close_one_position(pos):
@@ -435,6 +501,7 @@ def handle_target_reached(total_unrealized):
         trade_data = state.active_trade_info.pop(symbol, None)
         if not trade_data:
             continue
+        trade_data["exit_reason"] = "TARGET"
         target_realized += finalize_trade(symbol, trade_data)
 
     try:
@@ -530,6 +597,7 @@ def monitor_positions():
     # Telegram тайлангийн хязгаарлалтаас ӨМНӨ — breakeven зөөлт нь тайлангийн
     # давтамжаас хамаарч хойшлох ёсгүй.
     check_partial_tp_fills(positions)
+    check_time_stops(positions)
 
     now = time.time()
     if now - state.last_telegram_report_time < TELEGRAM_REPORT_INTERVAL_SEC:

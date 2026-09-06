@@ -9,6 +9,7 @@ global state-ийг тест бүрийн өмнө цэвэрлэдэг.
     pip install -r requirements-dev.txt
     pytest -v
 """
+import csv
 from datetime import datetime, timedelta
 import json
 
@@ -22,6 +23,7 @@ import account
 import binance_client
 import execution
 import indicators
+import journal
 import market_data
 import news
 import order_api
@@ -779,7 +781,9 @@ class TestTrailingActivation:
 
         activation = position_manager.calculate_trailing_activation("BTCUSDT", "BUY", 100.0)
 
-        assert activation > 100.0
+        # Яг утгаар нь шалгана: `> 100` гэсэн шалгуур нь mark_price * 1.001
+        # шалын ард нуугдаж, чиглэл эсрэгээрээ болсныг ч давуулж өнгөрөөнө.
+        assert activation == pytest.approx(101.0)
 
     def test_sell_activation_below_entry(self, monkeypatch, fake_symbol_info):
         monkeypatch.setattr(account, "get_positions", lambda: [])
@@ -787,7 +791,15 @@ class TestTrailingActivation:
 
         activation = position_manager.calculate_trailing_activation("BTCUSDT", "SELL", 100.0)
 
-        assert activation < 100.0
+        assert activation == pytest.approx(99.0)
+
+    def test_atr_scaled_level_overrides_the_configured_one(self, monkeypatch, fake_symbol_info):
+        monkeypatch.setattr(account, "get_positions", lambda: [])
+        patch_setting(monkeypatch, "TRAILING_ACTIVATION_PCT", 1.0)
+
+        activation = position_manager.calculate_trailing_activation("BTCUSDT", "BUY", 100.0, trail_pct=4.0)
+
+        assert activation == pytest.approx(104.0)
 
     def test_buy_activation_stays_above_mark_price(self, monkeypatch, fake_symbol_info):
         # Mark price аль хэдийн entry-ээс дээш яваад байвал activation түүнээс дээш байх ёстой
@@ -926,6 +938,7 @@ class TestExecuteTradesHappyPath:
         assert tradeable[0]["side"] == "SELL"
 
     def test_position_size_follows_allocation_and_leverage(self, monkeypatch, tradeable):
+        patch_setting(monkeypatch, "ATR_RISK_SIZING_ENABLED", False)
         patch_setting(monkeypatch, "TRADE_ALLOCATION", 0.09)
         patch_setting(monkeypatch, "LEVERAGE", 5)
 
@@ -2400,7 +2413,7 @@ def breakeven_env(monkeypatch):
     """rebuild_protection_orders-ийг барьж, ямар stop-той дуудагдсаныг бүртгэнэ."""
     rebuilds = []
 
-    def fake_rebuild(symbol, side, qty, entry, pos_side, stop_price=None):
+    def fake_rebuild(symbol, side, qty, entry, pos_side, stop_price=None, levels=None):
         rebuilds.append({"symbol": symbol, "side": side, "qty": qty,
                          "entry": entry, "stop_price": stop_price})
         return True, 104.5, 103.0
@@ -2479,7 +2492,7 @@ class TestBreakevenAfterPartialFill:
 
     def test_failed_rebuild_is_retried_and_flagged_unprotected(self, monkeypatch, breakeven_env, telegram_messages):
         monkeypatch.setattr(position_manager, "rebuild_protection_orders",
-                            lambda symbol, side, qty, entry, pos_side, stop_price=None: (False, None, None))
+                            lambda symbol, side, qty, entry, pos_side, **kw: (False, None, None))
         bot_state.active_trade_info["BTCUSDT"] = _partially_filled_trade()
 
         position_manager.check_partial_tp_fills([_position("BTCUSDT", amt=2.0)])
@@ -2659,7 +2672,7 @@ class TestRebuildProtectionStopLevel:
                                 placed.__setitem__("tp", tp_price) or {"orderId": 2})
         monkeypatch.setattr(order_api, "place_trailing_stop_order", lambda *a, **kw: {"orderId": 3})
         monkeypatch.setattr(position_manager, "calculate_trailing_activation",
-                            lambda symbol, side, entry: 103.0)
+                            lambda symbol, side, entry, trail_pct=None: 103.0)
         return placed
 
     def test_default_stop_is_the_emergency_level(self, monkeypatch, protection_spy):
@@ -2687,3 +2700,327 @@ class TestRebuildProtectionStopLevel:
         position_manager.rebuild_protection_orders("BTCUSDT", "SELL", 4.0, 100.0, "BOTH")
 
         assert protection_spy["sl"] == pytest.approx(103.0)
+
+
+# ----------------------------------------------------------------
+# ATR-аар эрсдэлээ тэнцүүлсэн хэмжээ ба гарц
+#
+# Өмнө нь coin болгон балансын ижил 9%-ийг авдаг байсан тул тайван ба
+# хэлбэлзэлтэй coin-ы бодит эрсдэл олон дахин зөрдөг байв.
+# ----------------------------------------------------------------
+
+@pytest.fixture
+def atr_sizing(monkeypatch):
+    patch_setting(monkeypatch, "ATR_RISK_SIZING_ENABLED", True)
+    patch_setting(monkeypatch, "EMERGENCY_SL_PCT", 3.0)
+    patch_setting(monkeypatch, "TAKE_PROFIT_PCT", 4.5)
+    patch_setting(monkeypatch, "PARTIAL_TP_PCT", 2.0)
+    patch_setting(monkeypatch, "TRAILING_ACTIVATION_PCT", 3.0)
+    patch_setting(monkeypatch, "ATR_SL_MULTIPLIER", 2.0)
+    patch_setting(monkeypatch, "ATR_SL_MIN_PCT", 2.0)
+    patch_setting(monkeypatch, "ATR_SL_MAX_PCT", 5.0)
+    patch_setting(monkeypatch, "RISK_PER_TRADE_PCT", 1.25)
+    patch_setting(monkeypatch, "MIN_TRADE_ALLOCATION", 0.05)
+    patch_setting(monkeypatch, "MAX_TRADE_ALLOCATION", 0.13)
+    patch_setting(monkeypatch, "LEVERAGE", 5)
+    patch_setting(monkeypatch, "TRADE_ALLOCATION", 0.09)
+
+
+class TestAtrExitLevels:
+    def test_stop_widens_with_volatility(self, atr_sizing):
+        calm = risk.exit_levels(0.6)      # 2 * 0.6 = 1.2 → доод хашлага 2.0
+        rough = risk.exit_levels(2.0)     # 2 * 2.0 = 4.0
+
+        assert calm["sl"] == pytest.approx(2.0)
+        assert rough["sl"] == pytest.approx(4.0)
+
+    def test_reward_to_risk_ratio_is_preserved_at_every_volatility(self, atr_sizing):
+        for atr in (0.5, 1.2, 2.0, 4.0):
+            levels = risk.exit_levels(atr)
+            assert levels["tp"] / levels["sl"] == pytest.approx(4.5 / 3.0)
+            assert levels["partial"] / levels["sl"] == pytest.approx(2.0 / 3.0)
+            assert levels["trail"] / levels["sl"] == pytest.approx(1.0)
+
+    def test_stop_is_clamped_at_both_ends(self, atr_sizing):
+        assert risk.exit_levels(0.1)["sl"] == pytest.approx(2.0)
+        assert risk.exit_levels(9.0)["sl"] == pytest.approx(5.0)
+
+    def test_disabled_returns_the_configured_levels_untouched(self, monkeypatch, atr_sizing):
+        patch_setting(monkeypatch, "ATR_RISK_SIZING_ENABLED", False)
+
+        levels = risk.exit_levels(2.0)
+
+        assert levels == {"sl": 3.0, "tp": 4.5, "partial": 2.0, "trail": 3.0}
+
+    def test_missing_atr_falls_back_to_the_configured_levels(self, atr_sizing):
+        assert risk.exit_levels(None)["sl"] == pytest.approx(3.0)
+        assert risk.exit_levels(0.0)["sl"] == pytest.approx(3.0)
+
+
+class TestRiskBasedPositionMargin:
+    def test_loss_at_stop_is_the_same_share_of_balance_whatever_the_volatility(self, atr_sizing):
+        balance = 10_000.0
+        for atr in (1.1, 1.5, 2.0):          # хашлагад хүрэхгүй муж
+            sl = risk.exit_levels(atr)["sl"]
+            notional = risk.position_margin(balance, sl) * 5
+            assert notional * sl / 100 == pytest.approx(balance * 0.0125)
+
+    def test_a_volatile_coin_gets_a_smaller_position(self, atr_sizing):
+        calm = risk.position_margin(10_000.0, risk.exit_levels(1.1)["sl"])
+        rough = risk.position_margin(10_000.0, risk.exit_levels(2.5)["sl"])
+
+        assert rough < calm
+
+    def test_margin_is_capped_so_six_positions_stay_possible(self, atr_sizing):
+        # Маш нарийн stop нь эрсдэлийн томьёогоор асар том позиц гаргана
+        assert risk.position_margin(10_000.0, 0.4) == pytest.approx(1_300.0)
+
+    def test_margin_has_a_floor_so_tiny_trades_are_not_opened(self, atr_sizing):
+        assert risk.position_margin(10_000.0, 20.0) == pytest.approx(500.0)
+
+    def test_disabled_falls_back_to_flat_allocation(self, monkeypatch, atr_sizing):
+        patch_setting(monkeypatch, "ATR_RISK_SIZING_ENABLED", False)
+
+        assert risk.position_margin(10_000.0, 3.0) == pytest.approx(900.0)
+
+
+class TestAtrSizingReachesTheOrder:
+    def test_volatile_coin_is_traded_smaller_than_a_calm_one(self, monkeypatch, tradeable, atr_sizing):
+        calm = _coin(price=100.0)
+        calm["atr_pct"] = 1.1
+        execution.execute_trades([calm], total_balance=10_000.0)
+        calm_qty = tradeable[0]["quantity"]
+
+        bot_state.active_trade_info.clear()
+        tradeable.clear()
+        rough = _coin(price=100.0)
+        rough["atr_pct"] = 2.5
+        execution.execute_trades([rough], total_balance=10_000.0)
+
+        assert tradeable[0]["quantity"] < calm_qty
+
+    def test_protection_orders_are_built_from_the_same_levels(self, monkeypatch, tradeable, atr_sizing):
+        captured = {}
+        monkeypatch.setattr(position_manager, "rebuild_protection_orders",
+                            lambda symbol, side, qty, entry, pos_side, **kw:
+                                captured.update(kw) or (True, 103.0, 101.0))
+        coin = _coin(price=100.0)
+        coin["atr_pct"] = 2.0
+
+        execution.execute_trades([coin], total_balance=10_000.0)
+
+        assert captured["levels"]["sl"] == pytest.approx(4.0)
+        assert captured["levels"]["tp"] == pytest.approx(6.0)
+
+    def test_partial_take_profit_uses_the_scaled_level(self, monkeypatch, tradeable, atr_sizing):
+        captured = {}
+        monkeypatch.setattr(position_manager, "place_partial_tp",
+                            lambda symbol, side, qty, entry, pos_side, **kw:
+                                captured.update(kw) or 102.7)
+        coin = _coin(price=100.0)
+        coin["atr_pct"] = 2.0
+
+        execution.execute_trades([coin], total_balance=10_000.0)
+
+        assert captured["partial_pct"] == pytest.approx(4.0 * 2.0 / 3.0)
+
+    def test_entry_conditions_are_captured_for_the_journal(self, tradeable, atr_sizing):
+        coin = _coin(price=100.0)
+        coin["atr_pct"] = 2.0
+        coin["volume_ratio"] = 2.7
+
+        execution.execute_trades([coin], total_balance=10_000.0)
+
+        context = bot_state.active_trade_info["BTCUSDT"]["entry_context"]
+        assert context["score"] == pytest.approx(50.0)
+        assert context["regime"] == "RANGE"
+        assert context["volume_ratio"] == pytest.approx(2.7)
+
+    def test_the_trade_records_the_levels_it_was_opened_with(self, monkeypatch, tradeable, atr_sizing):
+        coin = _coin(price=100.0)
+        coin["atr_pct"] = 2.0
+        execution.execute_trades([coin], total_balance=10_000.0)
+
+        assert bot_state.active_trade_info["BTCUSDT"]["levels"]["sl"] == pytest.approx(4.0)
+
+
+# ----------------------------------------------------------------
+# Хугацааны stop
+#
+# Чиглэлээ өгөөгүй позиц слот, маржин, funding идсээр байдаг мөртлөө SL ч TP ч
+# цохихгүй тул өөрөө хэзээ ч дуусахгүй.
+# ----------------------------------------------------------------
+
+@pytest.fixture
+def time_stop_env(monkeypatch, order_spy, fake_symbol_info):
+    monkeypatch.setattr(account, "get_position_mode", lambda: False)
+    monkeypatch.setattr(order_api, "cancel_all_symbol_orders", lambda symbol: None)
+    patch_setting(monkeypatch, "MAX_HOLD_HOURS", 24)
+    patch_setting(monkeypatch, "TIME_STOP_FLAT_PCT", 1.0)
+    return order_spy
+
+
+def _stale_trade(side="BUY", hours_ago=30):
+    trade = _trade_info(side=side)
+    trade["opened_at"] = time.time() - hours_ago * 3600
+    return trade
+
+
+class TestTimeStop:
+    def test_flat_position_past_the_deadline_is_closed(self, time_stop_env):
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade()
+
+        position_manager.check_time_stops([_position("BTCUSDT", amt=1.0, entry=100.0, mark=100.4)])
+
+        assert len(time_stop_env) == 1
+        assert time_stop_env[0]["side"] == "SELL"
+
+    def test_a_young_position_is_left_alone(self, time_stop_env):
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade(hours_ago=2)
+
+        position_manager.check_time_stops([_position("BTCUSDT", amt=1.0, entry=100.0, mark=100.4)])
+
+        assert time_stop_env == []
+
+    def test_a_position_that_is_actually_moving_is_left_to_its_stops(self, time_stop_env):
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade()
+
+        position_manager.check_time_stops([_position("BTCUSDT", amt=1.0, entry=100.0, mark=102.5)])
+
+        assert time_stop_env == []
+
+    def test_a_losing_position_is_also_left_to_its_stop(self, time_stop_env):
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade()
+
+        position_manager.check_time_stops([_position("BTCUSDT", amt=1.0, entry=100.0, mark=97.5)])
+
+        assert time_stop_env == []
+
+    def test_a_moving_short_is_left_to_its_stops(self, time_stop_env):
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade(side="SELL")
+
+        position_manager.check_time_stops([_position("BTCUSDT", amt=-1.0, entry=100.0, mark=97.5)])
+
+        assert time_stop_env == []
+
+    def test_a_short_reports_its_move_as_profit_not_as_price(self, time_stop_env, telegram_messages):
+        # Short дээр үнэ 0.4% ӨСӨХ нь 0.4% АЛДАГДАЛ. Түүхий үнийн хөдөлгөөнийг
+        # хэвлэвэл тайлан эсрэгээрээ уншигдана.
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade(side="SELL")
+
+        position_manager.check_time_stops([_position("BTCUSDT", amt=-1.0, entry=100.0, mark=100.4)])
+
+        assert len(time_stop_env) == 1
+        assert any("-0.40%" in m for m in telegram_messages)
+
+    def test_close_order_is_not_resent_every_cycle(self, time_stop_env):
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade()
+        pos = _position("BTCUSDT", amt=1.0, entry=100.0, mark=100.4)
+
+        position_manager.check_time_stops([pos])
+        position_manager.check_time_stops([pos])
+
+        assert len(time_stop_env) == 1
+
+    def test_disabled_when_no_deadline_is_configured(self, monkeypatch, time_stop_env):
+        patch_setting(monkeypatch, "MAX_HOLD_HOURS", 0)
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade()
+
+        position_manager.check_time_stops([_position("BTCUSDT", amt=1.0, entry=100.0, mark=100.4)])
+
+        assert time_stop_env == []
+
+    def test_exit_reason_is_recorded_for_the_journal(self, time_stop_env):
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade()
+
+        position_manager.check_time_stops([_position("BTCUSDT", amt=1.0, entry=100.0, mark=100.4)])
+
+        assert bot_state.active_trade_info["BTCUSDT"]["exit_reason"] == "TIME_STOP"
+
+    def test_monitor_positions_applies_the_time_stop(self, monkeypatch, time_stop_env, monitor_env):
+        monkeypatch.setattr(account, "get_positions",
+                            lambda: [_position("BTCUSDT", amt=1.0, entry=100.0, mark=100.4)])
+        bot_state.active_trade_info["BTCUSDT"] = _stale_trade()
+
+        position_manager.monitor_positions()
+
+        assert len(time_stop_env) == 1
+
+
+# ----------------------------------------------------------------
+# Арилжааны бүртгэл (CSV)
+#
+# Тохиргоог таамгаар биш, хаагдсан арилжааны тоо баримтаар тааруулах суурь.
+# ----------------------------------------------------------------
+
+@pytest.fixture
+def journal_env(monkeypatch, isolated_state_files):
+    patch_setting(monkeypatch, "JOURNAL_ENABLED", True)
+    monkeypatch.setattr(account, "get_trade_realized_pnl", lambda symbol, opened_at_ms: 12.5)
+    return isolated_state_files / "trades.csv"
+
+
+def _journalled_trade():
+    trade = _trade_info(strategy="BREAKOUT", side="BUY")
+    trade["entry_context"] = journal.entry_context({
+        "score": 21.5, "adx": 31.0, "rsi": 44.0, "atr_pct": 1.8,
+        "volume_ratio": 2.4, "ema_slope": 0.9, "regime": "TRENDING",
+        "chop": 40.0, "sentiment": 0.5, "funding": 0.0001, "mtf": "BULLISH",
+    })
+    trade["levels"] = {"sl": 3.6, "tp": 5.4, "partial": 2.4, "trail": 3.6}
+    return trade
+
+
+def _rows(path):
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+class TestTradeJournal:
+    def test_a_closed_trade_is_written_with_its_entry_conditions(self, journal_env):
+        position_manager.finalize_trade("BTCUSDT", _journalled_trade())
+
+        row = _rows(journal_env)[0]
+        assert row["symbol"] == "BTCUSDT"
+        assert row["strategy"] == "BREAKOUT"
+        assert float(row["pnl"]) == pytest.approx(12.5)
+        assert float(row["score"]) == pytest.approx(21.5)
+        assert row["regime"] == "TRENDING"
+        assert row["mtf"] == "BULLISH"
+
+    def test_the_levels_the_trade_actually_used_are_recorded(self, journal_env):
+        position_manager.finalize_trade("BTCUSDT", _journalled_trade())
+
+        row = _rows(journal_env)[0]
+        assert float(row["sl_pct"]) == pytest.approx(3.6)
+        assert float(row["tp_pct"]) == pytest.approx(5.4)
+
+    def test_exit_reason_distinguishes_a_time_stop(self, journal_env):
+        trade = _journalled_trade()
+        trade["exit_reason"] = "TIME_STOP"
+
+        position_manager.finalize_trade("BTCUSDT", trade)
+
+        assert _rows(journal_env)[0]["exit_reason"] == "TIME_STOP"
+
+    def test_header_is_written_once_and_trades_accumulate(self, journal_env):
+        position_manager.finalize_trade("BTCUSDT", _journalled_trade())
+        position_manager.finalize_trade("ETHUSDT", _journalled_trade())
+
+        rows = _rows(journal_env)
+        assert [r["symbol"] for r in rows] == ["BTCUSDT", "ETHUSDT"]
+
+    def test_disabled_writes_nothing(self, monkeypatch, journal_env):
+        patch_setting(monkeypatch, "JOURNAL_ENABLED", False)
+
+        position_manager.finalize_trade("BTCUSDT", _journalled_trade())
+
+        assert not journal_env.exists()
+
+    def test_a_broken_journal_never_blocks_the_trade_accounting(self, monkeypatch, journal_env):
+        monkeypatch.setattr(journal, "JOURNAL_FILE", "/proc/definitely/not/writable.csv")
+
+        pnl = position_manager.finalize_trade("BTCUSDT", _journalled_trade())
+
+        assert pnl == pytest.approx(12.5)
+        assert bot_state.session_realized_pnl == pytest.approx(12.5)

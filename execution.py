@@ -8,6 +8,7 @@ from settings import *
 from state import state
 import account
 import binance_client
+import journal
 import market_data
 import notifications
 import order_api
@@ -50,7 +51,11 @@ def execute_trades(selected_coins, total_balance):
             notifications.send_telegram(format_block("БАЛАНС БАГА", "⚠️", [("Balance", f"${total_balance:.2f}")]))
             return
 
-        margin = total_balance * TRADE_ALLOCATION
+        # Гарцын түвшин ба хэмжээ хоёулаа тухайн coin-ы ATR-аас гарна:
+        # хэлбэлзэлтэй coin өргөн stop + бага хэмжээ, тайван coin нарийн stop +
+        # том хэмжээ авч, stop цохиход алдах дүн ойролцоогоор тэнцүү болно.
+        levels = risk.exit_levels(coin.get("atr_pct"))
+        margin = risk.position_margin(total_balance, levels["sl"])
         if symbol in state.unprotected_symbols:
             log.info(f"⏸️ {symbol}: unprotected, skip new trade")
             continue
@@ -137,7 +142,9 @@ def execute_trades(selected_coins, total_balance):
         opened_at_ms = binance_client.current_timestamp_ms()
 
 
-        success, tp_price, activation_price = position_manager.rebuild_protection_orders(symbol, signal, actual_quantity, entry_price, actual_position_side)
+        success, tp_price, activation_price = position_manager.rebuild_protection_orders(
+            symbol, signal, actual_quantity, entry_price, actual_position_side, levels=levels
+        )
         if not success:
             notifications.send_telegram(format_block("PROTECTION FAILED", "🚨", [("Symbol", symbol), ("Action", "Closing position")]))
             close_result = order_api.place_market_order(symbol, close_side, actual_quantity, reduce_only=True, position_side=actual_position_side)
@@ -158,7 +165,8 @@ def execute_trades(selected_coins, total_balance):
         # Хэсэгчилсэн TP-г заавал хамгаалалт барьсны ДАРАА — rebuild нь эхлээд
         # symbol дээрх бүх conditional захиалгыг цуцалдаг.
         partial_tp_price = position_manager.place_partial_tp(
-            symbol, signal, actual_quantity, entry_price, actual_position_side
+            symbol, signal, actual_quantity, entry_price, actual_position_side,
+            partial_pct=levels["partial"]
         )
 
         state.active_trade_info[symbol] = {
@@ -174,6 +182,11 @@ def execute_trades(selected_coins, total_balance):
             "tp_order_id": None,
             "partial_tp_price": partial_tp_price,
             "breakeven_done": False,
+            "levels": levels,
+            # Орох үеийн нөхцөлийг хамт хадгална — арилжаа хаагдахад journal
+            # руу бичигдэж, дараа нь "аль оноо/regime ашигтай вэ" гэдгийг
+            # таамгаар биш тоогоор шалгах боломж өгнө.
+            "entry_context": journal.entry_context(coin),
             "recovered": False
         }
         # Шинэ позицын стратегийг тэр дороо дискэнд бичнэ — үүний дараа шууд
@@ -193,7 +206,8 @@ def execute_trades(selected_coins, total_balance):
                     ("", ""),
                     ("Entry", f"${entry_price:,.6f}"),
                     ("Qty", actual_quantity),
-                    ("Margin", f"${margin:.2f} ({LEVERAGE}x)"),
+                    ("Margin", f"${margin:.2f} ({LEVERAGE}x, {margin / total_balance * 100:.1f}%)"),
+                    ("Stop / ATR", f"{levels['sl']:.2f}% (ATR {coin.get('atr_pct', 0):.2f}%)"),
                     ("", ""),
                     ("Take Profit", f"${tp_price:,.6f}"),
                     ("Partial TP", f"{PARTIAL_TP_RATIO * 100:.0f}% @ ${partial_tp_price:,.6f} → stop breakeven" if partial_tp_price else "off"),

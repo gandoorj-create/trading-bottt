@@ -13,6 +13,20 @@
   "trade_allocation": 0.09,
   "leverage": 5,
 
+  "atr_risk_sizing_enabled": true,
+  "risk_per_trade_pct": 1.25,
+  "atr_sl_multiplier": 2.0,
+  "atr_sl_min_pct": 2.0,
+  "atr_sl_max_pct": 5.0,
+  "min_trade_allocation": 0.045,
+  "max_trade_allocation": 0.09,
+
+  "max_hold_hours": 24,
+  "time_stop_flat_pct": 1.0,
+
+  "journal_enabled": true,
+  "journal_file": "trades.csv",
+
   "trailing_callback_rate": 1.0,
   "trailing_activation_pct": 3.0,
   "take_profit_pct": 4.5,
