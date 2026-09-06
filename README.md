@@ -443,6 +443,53 @@ positions = account.get_positions()      # ✅
 гэж бичихэд зөвхөн локал нэр солигдож, бусад модуль хуучин утгыг хараад
 **арилжаа зогсох ёстой газраа зогсохгүй** байх эрсдэлтэй.
 
+## Sports Value Bet Scanner (`sports_bot.py`)
+
+Crypto ботоос тусдаа, бие даасан скрипт. NBA/NFL/MLB/хөлбөмбөгийн ханшийг
+[The Odds API](https://the-odds-api.com)-с татаж, Pinnacle (sharp book)-ийн
+ханшнаас vig цэвэрлээд бодит магадлал гаргаж, бусад bookmaker-той харьцуулна.
+
+- **Зах зээл**: зөвхөн `h2h` (хэн хожих) + `spreads` (гандикап). Props орхигдсон.
+- **Handicap яг таарах шаардлага**: `-5.5` зөвхөн `-5.5`-тай харьцуулагдана
+  (`value_scanner.py` — `point` талбар таарахгүй бол edge тооцохгүй).
+- **De-vig**: `devig.py` — proportional/multiplicative арга (implied prob-ыг
+  overround-д харьцуулж нормчилно).
+- **Скан**: `sports_scanner.scan_interval_minutes` (анхдагч 15 мин) тутам,
+  `min_edge_pct`-аас (анхдагч 3%) дээш EV-тэй bet-үүдийг EV-ээр эрэмбэлж топ
+  `top_n`-ыг Telegram руу явуулна.
+- **Давхардал**: `event+market+line+book+selection` key-гээр
+  (`sports_state.py`, `sports_seen.json`) — нэг bet хоёр удаа мэдэгдэхгүй.
+- **Stake**: `kelly.py` — 1/4 Kelly, `max_stake_pct`-аар хязгаарлагдана
+  (анхдагч 3%). Бооцоог АВТОМАТААР ТАВИХГҮЙ — зөвхөн санал болгоно, гараар
+  тавина (bookmaker-ууд auto-bet-ийг таньж аккаунт хаадаг).
+- **Бүртгэл**: `sports_journal.py` → `sports_bets.csv`. `result`/`pnl`
+  баганыг гараар нөхөж, edge үнэхээр байгаа эсэхийг цаасан дээр эхлээд
+  шалгана (200-300 бооцоо).
+
+Тохиргоо: `.env`-д `ODDS_API_KEY` + тусдаа `SPORTS_TELEGRAM_BOT_TOKEN`/
+`SPORTS_TELEGRAM_CHAT_ID` (crypto ботын bot-той холилдохгүй, @BotFather-с
+шинээр `/newbot`), `config.json`-ы `sports_scanner` блок (спортын жагсаалт,
+region, bankroll, edge босго гэх мэт). Ажиллуулах: `python sports_bot.py`.
+
+### Хост: Railway шаардлагагүй — GitHub Actions (үнэгүй)
+
+`.github/workflows/sports-scanner.yml` нь `sports_bot.py --once`-ыг 15 мин
+тутам GitHub Actions дээр ажиллуулна (24/7 сервер хэрэггүй, зээлийн карт
+шаардахгүй, GitHub-ийн үнэгүй quota дотор багтдаг). Асаахын тулд:
+
+1. Энэ workflow файл repo-гийн **default branch** (жишээ нь `main`) дээр
+   байх ёстой — `schedule` trigger зөвхөн тэндхийн workflow-г ажиллуулна.
+2. Repo → Settings → Secrets and variables → Actions руу орж нэмнэ:
+   `ODDS_API_KEY`, `SPORTS_TELEGRAM_BOT_TOKEN`, `SPORTS_TELEGRAM_CHAT_ID`.
+3. Dedupe cache (`sports_seen.json`) болон journal (`sports_bets.csv`)-ыг
+   ажиллагаа бүрийн төгсгөлд workflow өөрөө repo руу commit хийж хадгална
+   (Actions runner бүр шинээр эхэлдэг тул үгүй бол dedupe/бүртгэл алга болно).
+
+Хязгаарлалт: GitHub-ийн cron яг 15 мин тутамд биш, ачаалал ихсэх үед
+хойшлогдож болно; мөн 60 хоног commit ороогүй repo дээр автоматаар унтардаг
+(Actions tab-аас гараар дахин асаана). Үнэхээр тасралтгүй 24/7 процесс
+хүсвэл Fly.io эсвэл Oracle Cloud-ийн үнэгүй always-on VM илүү тохиромжтой.
+
 ## Мэдэгдэж буй хязгаарлалт
 
 - `position_manager.py` 682 мөр — цаашид хаалт/хяналтын хэсгийг салгаж болно

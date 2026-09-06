@@ -4,9 +4,14 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Нууц (API key, bot token) — хэзээ ч git-д орохгүй
+.env
+
 # Ботын runtime state — сервер дээр үүсдэг, репод хадгалахгүй
 strategy_state.json
 session_state.json
 bot.log
 bot.log.*
 trades.csv
+sports_bets.csv
+sports_seen.json

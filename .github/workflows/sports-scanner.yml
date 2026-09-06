@@ -1,0 +1,58 @@
+name: Sports Value Bet Scanner
+
+# Railway шаардлагагүй, GitHub Actions дээр ҮНЭГҮЙ ажиллана. 15 мин тутам
+# нэг скан хийгээд гарна (sports_bot.py --once), дараа нь дараагийн cron
+# firing дээр GitHub өөрөө дахин эхлүүлнэ.
+#
+# ШААРДЛАГАТАЙ:
+#   1. Энэ файл repo-гийн ӨГӨГДМӨЛ (default) branch дээр байх ёстой —
+#      schedule trigger зөвхөн default branch дээрх workflow-г ажиллуулна.
+#   2. Repo Settings → Secrets and variables → Actions руу орж дараах
+#      secret-үүдийг нэмнэ: ODDS_API_KEY, SPORTS_TELEGRAM_BOT_TOKEN,
+#      SPORTS_TELEGRAM_CHAT_ID
+#
+# ХЯЗГААРЛАЛТ: GitHub-ийн schedule нь яг 15 мин тутамд биш, ачаалал ихсэх
+# үед хойшлогдож болно; мөн 60 хоног commit ороогүй repo дээр автоматаар
+# унтардаг (Actions tab-аас "Re-enable workflow" гэж дахин асаана).
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sports-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Value bet scan (нэг цикл)
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          SPORTS_TELEGRAM_BOT_TOKEN: ${{ secrets.SPORTS_TELEGRAM_BOT_TOKEN }}
+          SPORTS_TELEGRAM_CHAT_ID: ${{ secrets.SPORTS_TELEGRAM_CHAT_ID }}
+        run: python sports_bot.py --once
+
+      # Dedupe cache (sports_seen.json) болон paper-trading journal
+      # (sports_bets.csv)-ыг дараагийн ажиллагаанд дамжуулахын тулд repo руу
+      # буцааж commit хийнэ — GitHub Actions runner бүр шинээр эхэлдэг тул
+      # эдгээр файл ажиллагаа хооронд өөрөө хадгалагдахгүй.
+      - name: State-ийг repo руу хадгалах
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f sports_seen.json sports_bets.csv 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: sports scanner state [skip ci]"
+          git push
