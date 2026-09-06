@@ -2,22 +2,23 @@
 
 NICE-ээс export хийсэн Excel хуулга, SAP-аас татсан Excel/CSV хуулгыг
 `огноо + дүн + дансны дугаар` key-ээр тулгаж, зөрсөн мөрүүдийг л
-Excel тайлан болгон гаргадаг script. Зөрүү гарвал Telegram-руу мэдэгдэнэ.
+Excel тайлан болгон гаргадаг script. **Энэ `reconciliation/` folder бие
+даан ажилладаг** — гол trading bot код хамаагүй, зөвхөн энэ folder болон
+Python хэрэгтэй.
+
+Telegram мэдэгдэл нэмэлт (заавал биш): `.env`-д эсвэл орчны хувьсагчид
+`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` тохируулаагүй бол зүгээр л
+алгасаад, Excel тайлан л гарна.
 
 ## Тохиргоо
 
-1. `reconciliation/config.json` дотор:
-   - `nice_file`, `sap_file` — хоёр хуулгын файлын зам
-   - `nice_columns` / `sap_columns` — хуулга бүрийн бодит баганы нэрс
-     (энэ репод байгаа утга бол зөвхөн жишээ — өөрийн хуулганд байгаа
-     баганы нэртэй тааруулж солино)
-   - `output_file` — тайлан хаана бичигдэх
-2. Telegram мэдэгдэл авахын тулд `.env`-д (эсвэл орчны хувьсагчид):
-   ```
-   TELEGRAM_BOT_TOKEN=...
-   TELEGRAM_CHAT_ID=...
-   ```
-   Токен байхгүй бол мэдэгдэл алгасагдаад Excel тайлан л үлдэнэ.
+`reconciliation/config.json` дотор:
+- `nice_file`, `sap_file` — хоёр хуулгын файлын зам (`reconciliation/`
+  хавтаснаас хамааралтай relative зам)
+- `nice_columns` / `sap_columns` — хуулга бүрийн бодит баганы нэрс
+  (энэ репод байгаа утга бол зөвхөн жишээ — өөрийн хуулганд байгаа
+  баганы нэртэй тааруулж солино)
+- `output_file` — тайлан хаана бичигдэх
 
 SAP-ыг CSV-ээр татдаг бол `pd.read_excel`-ийг `pd.read_csv`-ээр солих
 хэрэгтэй (`reconcile.py`-н `load_statement` функц) — асуувал нэмж өгье.
@@ -25,7 +26,7 @@ SAP-ыг CSV-ээр татдаг бол `pd.read_excel`-ийг `pd.read_csv`-э�
 ## Ажиллуулах
 
 ```bash
-pip install -r requirements.txt
+pip install -r reconciliation/requirements.txt
 python reconciliation/reconcile.py
 ```
 
@@ -43,9 +44,10 @@ Script зөрүүтэй бол exit code 1, зөрүүгүй бол 0-ээр г�
 
 1. Python суулгаагүй бол [python.org](https://www.python.org/downloads/)-оос
    суулгана — суулгах үед "**Add python.exe to PATH**" гэдгийг заавал чагтална.
-2. Энэ repo-г PC-рүүгээ татна: GitHub дээр **Code → Download ZIP** дараад
-   задлах, эсвэл `git clone`.
-3. `reconciliation\run_reconcile.bat` файл дээр **давхар дарна**. Анх удаа
+2. `reconciliation` folder-ыг бүхэлд нь PC-рүүгээ татна (доторх бүх файл —
+   `reconcile.py`, `config.json`, `requirements.txt`, `run_reconcile.bat`
+   гэх мэт хамт байх ёстой; трейдинг ботын үлдсэн код хэрэггүй).
+3. `run_reconcile.bat` файл дээр **давхар дарна**. Анх удаа
    ажиллахад python орчин үүсгэж, шаардлагатай package-уудыг суулгах тул
    хэсэг хугацаа авна; дараагийн удаа хурдан ажиллана.
 4. Дуусмагц зөрүү байвал `reconciliation\reports\mismatch_report.xlsx`

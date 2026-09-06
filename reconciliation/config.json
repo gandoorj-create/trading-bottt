@@ -1,7 +1,7 @@
 {
-  "nice_file": "reconciliation/data/nice_statement.xlsx",
-  "sap_file": "reconciliation/data/sap_statement.xlsx",
-  "output_file": "reconciliation/reports/mismatch_report.xlsx",
+  "nice_file": "data/nice_statement.xlsx",
+  "sap_file": "data/sap_statement.xlsx",
+  "output_file": "reports/mismatch_report.xlsx",
 
   "nice_sheet": 0,
   "sap_sheet": 0,

@@ -25,8 +25,8 @@ sap_rows = [
     {"Posting Date": "2026-09-02", "Amount": 200000, "Account": "5009876543", "Reference": "SAP-9003"},
 ]
 
-nice_path = os.path.join(os.path.dirname(_DIR), cfg["nice_file"])
-sap_path = os.path.join(os.path.dirname(_DIR), cfg["sap_file"])
+nice_path = os.path.join(_DIR, cfg["nice_file"])
+sap_path = os.path.join(_DIR, cfg["sap_file"])
 os.makedirs(os.path.dirname(nice_path), exist_ok=True)
 os.makedirs(os.path.dirname(sap_path), exist_ok=True)
 

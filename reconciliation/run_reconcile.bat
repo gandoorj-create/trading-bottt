@@ -1,6 +1,6 @@
 @echo off
 setlocal
-cd /d "%~dp0\.."
+cd /d "%~dp0"
 
 if not exist ".venv" (
     echo Python орчин үүсгэж байна...
@@ -10,10 +10,10 @@ if not exist ".venv" (
 call .venv\Scripts\activate.bat
 pip install -q -r requirements.txt
 
-python reconciliation\reconcile.py
+python reconcile.py
 set RC=%ERRORLEVEL%
 
-set REPORT=reconciliation\reports\mismatch_report.xlsx
+set REPORT=reports\mismatch_report.xlsx
 if exist "%REPORT%" (
     start "" "%REPORT%"
 )

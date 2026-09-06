@@ -1,21 +1,36 @@
 """
 reconcile.py
 NICE болон SAP хуулгыг тулгаж, зөрүүг Excel тайлан болгон гаргах.
+Гол trading bot repo-оос бие даасан — зөвхөн энэ reconciliation/ folder
+болон pandas/openpyxl (Telegram мэдэгдэлд requests) хэрэгтэй.
 
 Ашиглах: python reconciliation/reconcile.py [--config PATH]
 """
 import argparse
 import json
+import logging
 import os
 import sys
 
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from notifications import send_telegram  # noqa: E402
-from logging_setup import get_logger, setup_logging  # noqa: E402
+log = logging.getLogger("reconcile")
 
-log = get_logger(__name__)
+
+def send_telegram(text):
+    """TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID тохируулаагүй бол алгасна."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return False
+    try:
+        import requests
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
+        return resp.status_code == 200
+    except Exception as e:
+        log.warning(f"⚠️ Telegram илгээж чадсангүй: {e}")
+        return False
 
 
 def load_config(path):
@@ -120,7 +135,7 @@ def notify(report, matched_count, total_count):
 
 
 def main():
-    setup_logging()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     parser = argparse.ArgumentParser(description="NICE ба SAP хуулгыг тулгах")
     parser.add_argument(
         "--config",
@@ -129,6 +144,12 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    # nice_file/sap_file/output_file зам нь энэ ажиллуулсан хавтаснаас биш,
+    # config.json-той адил хавтаснаас хамааралтай байх ёстой.
+    base_dir = os.path.dirname(os.path.abspath(args.config))
+    for key in ("nice_file", "sap_file", "output_file"):
+        if not os.path.isabs(cfg[key]):
+            cfg[key] = os.path.join(base_dir, cfg[key])
 
     nice_df = load_statement(
         cfg["nice_file"], cfg.get("nice_sheet", 0), cfg["nice_columns"],
