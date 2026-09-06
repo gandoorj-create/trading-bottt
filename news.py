@@ -17,6 +17,19 @@ from logging_setup import get_logger
 
 log = get_logger(__name__)
 
+# Календарийг хэр олон удаа шалгах вэ. Эвент нь долоо хоногийн хуваарь тул
+# цагт нэг л хангалттай. Алдаа гарвал улам сийрэгжинэ — эс тэгвээс мөчлөг
+# тутамд (30 сек) сүлжээ цохиж, log-ыг warning-оор дүүргэнэ.
+NEWS_LOOKUP_INTERVAL_SEC = 3600
+NEWS_RETRY_INTERVAL_SEC = 900
+# Хэдэн удаа дараалан амжилтгүй болоход "зогсоолт ажиллахгүй байна" гэж
+# мэдэгдэх вэ. Чимээгүй унтарсан хамгаалалт бол хамгийн аюултай төрөл.
+NEWS_FAILURE_ALERT_AT = 3
+
+
+class NewsCalendarError(RuntimeError):
+    """Календарийг уншиж чадсангүй. "Эвент байхгүй"-гээс ялгаатай."""
+
 
 def get_next_news_event():
     """Хамгийн ойрын ирээдүйн өндөр нөлөөтэй USD эвентийн UTC цаг.
@@ -26,17 +39,33 @@ def get_next_news_event():
     эс тэгвээс 2 хоногийн дараах эвент рүү тэмүүлж, маргаашийнхыг өнгөрөөнө.
     """
     if not NEWS_CALENDAR_URL:
-        return None
+        raise NewsCalendarError("calendar_url тохируулаагүй")
+
     try:
-        resp = requests.get(NEWS_CALENDAR_URL, timeout=10)
-        data = resp.json()
+        # Анхдагч python-requests User-Agent-ыг олон календарийн үйлчилгээ
+        # блоклож, JSON-ы оронд HTML сорилтын хуудас буцаадаг — тэр үед
+        # .json() нь "Expecting value: line 1 column 1" гэж унана.
+        resp = requests.get(
+            NEWS_CALENDAR_URL, timeout=10,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; trading-bot/1.0)",
+                     "Accept": "application/json"},
+        )
     except Exception as e:
-        log.warning(f"⚠️ News calendar error: {e}")
-        return None
+        raise NewsCalendarError(f"хүсэлт бүтсэнгүй: {e}") from e
+
+    if resp.status_code != 200:
+        raise NewsCalendarError(f"HTTP {resp.status_code}")
+
+    try:
+        data = resp.json()
+    except Exception:
+        # Юу ирснийг харуулна — "Expecting value" ганцаараа юу ч хэлдэггүй.
+        raise NewsCalendarError(
+            f"JSON биш хариу ({resp.headers.get('Content-Type', '?')}): {resp.text[:120]!r}"
+        )
 
     if not isinstance(data, list):
-        log.warning("⚠️ News calendar: хүлээгдэж буй жагсаалт ирсэнгүй")
-        return None
+        raise NewsCalendarError(f"жагсаалт хүлээж байсан, {type(data).__name__} ирлээ")
 
     now = datetime.now(pytz.UTC)
     ny_tz = pytz.timezone('America/New_York')
@@ -74,10 +103,7 @@ def check_news_status():
         return
 
     now = datetime.now(pytz.UTC)
-    stale = (not isinstance(state.last_news_check, datetime)) or (now - state.last_news_check).total_seconds() > 3600
-    if not state.next_news_time or stale:
-        state.next_news_time = get_next_news_event()
-        state.last_news_check = now
+    refresh_news_schedule(now)
 
     if not state.next_news_time:
         return
@@ -111,6 +137,42 @@ def check_news_status():
     if diff <= - (NEWS_WAIT_AFTER + 30) and state.news_mode_active:
         state.news_mode_active = False
         log.info("✅ News window closed. Resuming normal trading.")
+
+
+def refresh_news_schedule(now):
+    """Дараагийн эвентийн цагийг хэрэгтэй үед нь шинэчилнэ.
+
+    Өмнө нь нөхцөл нь `not state.next_news_time or stale` байсан тул хайлт
+    бүтэлгүйтэхэд next_news_time нь None хэвээр үлдэж, мөчлөг тутамд (30 сек)
+    дахин оролддог байв. Одоо оролдлогын хугацаагаар л шийднэ.
+    """
+    last = state.last_news_check if isinstance(state.last_news_check, datetime) else None
+    if last is not None:
+        if state.news_lookup_failures:
+            interval = min(NEWS_RETRY_INTERVAL_SEC * state.news_lookup_failures, NEWS_LOOKUP_INTERVAL_SEC)
+        else:
+            interval = NEWS_LOOKUP_INTERVAL_SEC
+        if (now - last).total_seconds() < interval:
+            return
+
+    state.last_news_check = now
+    try:
+        state.next_news_time = get_next_news_event()
+    except NewsCalendarError as e:
+        state.news_lookup_failures += 1
+        log.warning(f"⚠️ News calendar уншигдсангүй ({state.news_lookup_failures} дахь удаа): {e}")
+        if state.news_lookup_failures == NEWS_FAILURE_ALERT_AT:
+            notifications.send_telegram(format_block("МЭДЭЭНИЙ ЗОГСООЛТ АЖИЛЛАХГҮЙ БАЙНА", "⚠️", [
+                ("Шалтгаан", str(e)[:200]),
+                ("Үр дагавар", "CPI/FOMC-ийн өмнөх түр зогсоолт хийгдэхгүй"),
+                ("Техник арилжаа", "хэвийн үргэлжилнэ"),
+                ("Шийдэл", "config.json → news_trading.calendar_url шалгах"),
+            ]))
+        return
+
+    if state.news_lookup_failures:
+        log.info("✅ News calendar дахин уншигдлаа")
+    state.news_lookup_failures = 0
 
 
 def execute_post_news_trade():

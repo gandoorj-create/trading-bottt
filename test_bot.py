@@ -2601,18 +2601,37 @@ class TestPostNewsTradeIsOptional:
         news.execute_post_news_trade()
 
 
+def _fake_requests(json_body=None, status=200, text="", content_type="application/json", boom=None):
+    """news.requests-ийг орлох хамгийн бага хэрэгжүүлэлт."""
+    class R:
+        status_code = status
+        headers = {"Content-Type": content_type}
+
+        def __init__(self):
+            self.text = text
+
+        @staticmethod
+        def json():
+            if json_body is None:
+                raise ValueError("Expecting value: line 1 column 1 (char 0)")
+            return json_body
+
+    class FakeRequests:
+        calls = []
+
+        @staticmethod
+        def get(url, timeout=None, headers=None):
+            FakeRequests.calls.append({"url": url, "headers": headers or {}})
+            if boom:
+                raise boom
+            return R()
+
+    return FakeRequests
+
+
 class TestNewsCalendarParsing:
     def _calendar(self, monkeypatch, items):
-        class FakeRequests:
-            @staticmethod
-            def get(url, timeout=None):
-                class R:
-                    @staticmethod
-                    def json():
-                        return items
-                return R()
-
-        monkeypatch.setattr(news, "requests", FakeRequests)
+        monkeypatch.setattr(news, "requests", _fake_requests(json_body=items))
         patch_setting(monkeypatch, "NEWS_CALENDAR_URL", "https://example.invalid/cal.json")
         patch_setting(monkeypatch, "NEWS_EVENT_KEYWORDS", ["CPI", "FOMC"])
         return news.get_next_news_event()
@@ -3024,3 +3043,142 @@ class TestTradeJournal:
 
         assert pnl == pytest.approx(12.5)
         assert bot_state.session_realized_pnl == pytest.approx(12.5)
+
+
+# ----------------------------------------------------------------
+# Календар уншигдахгүй үе
+#
+# Live log дээр "News calendar error: Expecting value: line 1 column 1" гэж
+# 30 секунд тутам гарч байсан: хайлт бүтэлгүйтэхэд next_news_time нь None
+# хэвээр үлдэж, "хоосон бол дахин ав" нөхцөл мөчлөг тутамд дахин оролддог байв.
+# ----------------------------------------------------------------
+
+class TestNewsCalendarFailures:
+    def _fail(self, monkeypatch, **kw):
+        fake = _fake_requests(**kw)
+        monkeypatch.setattr(news, "requests", fake)
+        patch_setting(monkeypatch, "NEWS_CALENDAR_URL", "https://example.invalid/cal.json")
+        return fake
+
+    def test_html_instead_of_json_is_reported_with_what_arrived(self, monkeypatch):
+        self._fail(monkeypatch, json_body=None, text="<!DOCTYPE html><title>403</title>",
+                   content_type="text/html")
+
+        with pytest.raises(news.NewsCalendarError) as excinfo:
+            news.get_next_news_event()
+
+        assert "text/html" in str(excinfo.value)
+        assert "DOCTYPE" in str(excinfo.value)
+
+    def test_error_status_is_reported_before_parsing(self, monkeypatch):
+        self._fail(monkeypatch, json_body=[], status=403)
+
+        with pytest.raises(news.NewsCalendarError, match="403"):
+            news.get_next_news_event()
+
+    def test_a_non_list_body_is_a_failure_not_an_empty_calendar(self, monkeypatch):
+        self._fail(monkeypatch, json_body={"error": "rate limited"})
+
+        with pytest.raises(news.NewsCalendarError):
+            news.get_next_news_event()
+
+    def test_a_browser_user_agent_is_sent(self, monkeypatch):
+        # Анхдагч python-requests UA-г олон үйлчилгээ блоклодог
+        fake = self._fail(monkeypatch, json_body=[])
+
+        news.get_next_news_event()
+
+        assert "Mozilla" in fake.calls[0]["headers"]["User-Agent"]
+
+    def test_an_unset_url_is_reported_rather_than_read_as_no_events(self, monkeypatch):
+        # Тохируулаагүйг "эвент байхгүй" гэж чимээгүй өнгөрөөвөл хэрэглэгч
+        # зогсоолт ажиллаж байна гэж эндүүрнэ.
+        fake = self._fail(monkeypatch, json_body=[])
+        patch_setting(monkeypatch, "NEWS_CALENDAR_URL", "")
+
+        with pytest.raises(news.NewsCalendarError):
+            news.get_next_news_event()
+
+        assert fake.calls == []
+
+    def test_an_empty_calendar_is_not_an_error(self, monkeypatch):
+        self._fail(monkeypatch, json_body=[])
+
+        assert news.get_next_news_event() is None
+
+
+class TestNewsLookupBackoff:
+    @pytest.fixture(autouse=True)
+    def _enabled(self, monkeypatch):
+        patch_setting(monkeypatch, "NEWS_ENABLED", True)
+        patch_setting(monkeypatch, "NEWS_CALENDAR_URL", "https://example.invalid/cal.json")
+
+    def _count_lookups(self, monkeypatch, result=None):
+        calls = []
+
+        def lookup():
+            calls.append(1)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        monkeypatch.setattr(news, "get_next_news_event", lookup)
+        return calls
+
+    def test_a_failed_lookup_is_not_retried_every_cycle(self, monkeypatch):
+        calls = self._count_lookups(monkeypatch, news.NewsCalendarError("HTTP 403"))
+
+        for _ in range(20):          # ~10 минутын мониторингийн мөчлөгүүд
+            news.check_news_status()
+
+        assert len(calls) == 1
+
+    def test_the_retry_gap_widens_with_each_failure(self, monkeypatch):
+        calls = self._count_lookups(monkeypatch, news.NewsCalendarError("HTTP 403"))
+
+        news.check_news_status()
+        # 15 минутын дараа хоёр дахь оролдлого
+        bot_state.last_news_check = datetime.now(pytz.UTC) - timedelta(minutes=16)
+        news.check_news_status()
+        # Хоёр алдааны дараа завсар 30 минут — 16 минут хангалтгүй
+        bot_state.last_news_check = datetime.now(pytz.UTC) - timedelta(minutes=16)
+        news.check_news_status()
+
+        assert len(calls) == 2
+
+    def test_a_successful_lookup_is_cached_for_an_hour(self, monkeypatch):
+        calls = self._count_lookups(monkeypatch, _event_in(600))
+
+        for _ in range(10):
+            news.check_news_status()
+
+        assert len(calls) == 1
+
+    def test_repeated_failures_warn_the_user_once(self, monkeypatch, telegram_messages):
+        self._count_lookups(monkeypatch, news.NewsCalendarError("HTTP 403"))
+
+        for _ in range(6):
+            bot_state.last_news_check = None      # цаг хүлээхгүйгээр дахин оролдуулна
+            news.check_news_status()
+
+        alerts = [m for m in telegram_messages if "МЭДЭЭНИЙ ЗОГСООЛТ" in m]
+        assert len(alerts) == 1
+
+    def test_recovery_resets_the_backoff(self, monkeypatch):
+        self._count_lookups(monkeypatch, news.NewsCalendarError("HTTP 403"))
+        news.check_news_status()
+        assert bot_state.news_lookup_failures == 1
+
+        calls = self._count_lookups(monkeypatch, _event_in(600))
+        bot_state.last_news_check = None
+        news.check_news_status()
+
+        assert bot_state.news_lookup_failures == 0
+        assert len(calls) == 1
+
+    def test_a_broken_calendar_never_pauses_trading(self, monkeypatch):
+        self._count_lookups(monkeypatch, news.NewsCalendarError("HTTP 403"))
+
+        news.check_news_status()
+
+        assert bot_state.news_mode_active is False

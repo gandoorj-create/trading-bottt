@@ -83,6 +83,8 @@ class BotState:
         self.news_trade_done = False
         self.last_news_check = None
         self.next_news_time = None
+        # Дараалсан амжилтгүй хайлтын тоо — дахин оролдох завсрыг уртасгана
+        self.news_lookup_failures = 0
 
 
 # Бүх модуль ижил объектыг хуваалцана
