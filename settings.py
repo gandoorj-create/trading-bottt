@@ -166,6 +166,10 @@ NEWS_SYMBOLS = NEWS_TRADING.get("symbols", ["BTCUSDT"])
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY")
 ODDS_API_BASE_URL = os.environ.get("ODDS_API_BASE_URL", "https://api.the-odds-api.com")
 
+# Crypto ботоос тусдаа Telegram bot — мэдэгдэл холилдохгүй байх зорилготой.
+SPORTS_BOT_TOKEN = os.environ.get("SPORTS_TELEGRAM_BOT_TOKEN")
+SPORTS_CHAT_ID = os.environ.get("SPORTS_TELEGRAM_CHAT_ID")
+
 SPORTS_SCANNER = _cfg.get("sports_scanner", {})
 SPORTS_LIST = SPORTS_SCANNER.get(
     "sports", ["basketball_nba", "americanfootball_nfl", "baseball_mlb", "soccer_epl"]
@@ -187,10 +191,10 @@ def validate_sports_config():
     missing = []
     if not ODDS_API_KEY:
         missing.append("ODDS_API_KEY")
-    if not BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not CHAT_ID:
-        missing.append("TELEGRAM_CHAT_ID")
+    if not SPORTS_BOT_TOKEN:
+        missing.append("SPORTS_TELEGRAM_BOT_TOKEN")
+    if not SPORTS_CHAT_ID:
+        missing.append("SPORTS_TELEGRAM_CHAT_ID")
     if missing:
         raise RuntimeError(
             ".env дотор дараах утга дутуу байна: " + ", ".join(missing)

@@ -466,9 +466,10 @@ Crypto ботоос тусдаа, бие даасан скрипт. NBA/NFL/MLB/
   баганыг гараар нөхөж, edge үнэхээр байгаа эсэхийг цаасан дээр эхлээд
   шалгана (200-300 бооцоо).
 
-Тохиргоо: `.env`-д `ODDS_API_KEY` (+ хуучин `TELEGRAM_BOT_TOKEN`/`CHAT_ID`),
-`config.json`-ы `sports_scanner` блок (спортын жагсаалт, region, bankroll,
-edge босго гэх мэт). Ажиллуулах: `python sports_bot.py`.
+Тохиргоо: `.env`-д `ODDS_API_KEY` + тусдаа `SPORTS_TELEGRAM_BOT_TOKEN`/
+`SPORTS_TELEGRAM_CHAT_ID` (crypto ботын bot-той холилдохгүй, @BotFather-с
+шинээр `/newbot`), `config.json`-ы `sports_scanner` блок (спортын жагсаалт,
+region, bankroll, edge босго гэх мэт). Ажиллуулах: `python sports_bot.py`.
 
 ## Мэдэгдэж буй хязгаарлалт
 

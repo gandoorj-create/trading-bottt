@@ -7,11 +7,19 @@ import pytest
 
 import devig
 import kelly
+import notifications
 import odds_api
+import settings
 import sports_bot
 import sports_journal
 import sports_state
 import value_scanner
+
+
+# conftest.py-ийн autouse no_telegram fixture нь notifications.send_telegram-ийг
+# бүрмөсөн mock болгодог тул жинхэнэ token-routing логикыг шалгахын тулд энэ
+# файл import хийгдэх (fixture ажиллахаас өмнөх) үеийн жинхэнэ функцийг хадгална.
+_real_send_telegram = notifications.send_telegram
 
 
 @pytest.fixture(autouse=True)
@@ -241,3 +249,66 @@ def test_fetch_odds_raises_on_http_error(monkeypatch):
     monkeypatch.setattr(odds_api, "requests", FakeRequests)
     with pytest.raises(odds_api.OddsAPIError):
         odds_api.fetch_odds("basketball_nba", ["eu"], ["h2h"])
+
+
+# ---------------------------------------------------------------------------
+# Тусдаа Telegram bot (crypto ботоос ялгаатай)
+# ---------------------------------------------------------------------------
+
+def test_send_telegram_uses_explicit_sports_token(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    class FakeRequests:
+        @staticmethod
+        def post(url, json=None, timeout=None):
+            captured["url"] = url
+            captured["chat_id"] = json["chat_id"]
+            return FakeResponse()
+
+    monkeypatch.setattr(notifications, "requests", FakeRequests)
+    monkeypatch.setattr(notifications, "BOT_TOKEN", "crypto-token")
+    monkeypatch.setattr(notifications, "CHAT_ID", "crypto-chat")
+
+    ok = _real_send_telegram("hello", bot_token="sports-token", chat_id="sports-chat")
+    assert ok is True
+    assert "sports-token" in captured["url"]
+    assert captured["chat_id"] == "sports-chat"
+
+
+def test_send_telegram_falls_back_to_crypto_token_when_not_given(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    class FakeRequests:
+        @staticmethod
+        def post(url, json=None, timeout=None):
+            captured["url"] = url
+            return FakeResponse()
+
+    monkeypatch.setattr(notifications, "requests", FakeRequests)
+    monkeypatch.setattr(notifications, "BOT_TOKEN", "crypto-token")
+    monkeypatch.setattr(notifications, "CHAT_ID", "crypto-chat")
+
+    _real_send_telegram("hello")
+    assert "crypto-token" in captured["url"]
+
+
+def test_validate_sports_config_requires_sports_bot_token(monkeypatch):
+    monkeypatch.setattr(settings, "ODDS_API_KEY", "k")
+    monkeypatch.setattr(settings, "SPORTS_BOT_TOKEN", None)
+    monkeypatch.setattr(settings, "SPORTS_CHAT_ID", "c")
+    with pytest.raises(RuntimeError, match="SPORTS_TELEGRAM_BOT_TOKEN"):
+        settings.validate_sports_config()

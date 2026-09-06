@@ -21,6 +21,7 @@ from settings import (
     STATE_DIR, STATE_DIR_IS_PERSISTENT,
     SPORTS_LIST, SPORTS_REGIONS, SPORTS_SCAN_INTERVAL_MINUTES, SPORTS_MIN_EDGE_PCT,
     SPORTS_TOP_N, SPORTS_BANKROLL_USD, SPORTS_KELLY_MULTIPLIER, SPORTS_MAX_STAKE_PCT,
+    SPORTS_BOT_TOKEN, SPORTS_CHAT_ID,
     validate_sports_config,
 )
 from value_scanner import scan_sport, make_key
@@ -86,7 +87,7 @@ def run_scan_cycle():
         sports_journal.record_alert(bet, kelly_pct, stake)
         seen[key] = now
 
-    notifications.send_telegram("\n\n".join(lines))
+    notifications.send_telegram("\n\n".join(lines), bot_token=SPORTS_BOT_TOKEN, chat_id=SPORTS_CHAT_ID)
     sports_state.save_seen(seen)
     log.info(f"📡 {datetime.now().strftime('%H:%M:%S')} | {len(top)} value bet Telegram-руу илгээв (нийт {len(all_bets)} эдж)")
 
@@ -113,7 +114,10 @@ def main():
             error = traceback.format_exc()
             log.error(f"❌ SCAN ERROR\n{error}")
             try:
-                notifications.send_telegram(f"❌ Sports scanner алдаа:\n{error[:500]}")
+                notifications.send_telegram(
+                    f"❌ Sports scanner алдаа:\n{error[:500]}",
+                    bot_token=SPORTS_BOT_TOKEN, chat_id=SPORTS_CHAT_ID,
+                )
             except Exception:
                 pass
         time.sleep(SPORTS_SCAN_INTERVAL_MINUTES * 60)
