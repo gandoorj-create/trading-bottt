@@ -3601,3 +3601,31 @@ class TestBacktestPortfolio:
         longs = [t for t in sim["trades"] if t["side"] == "BUY"]
         assert longs
         assert sum(t["funding"] for t in longs) > 0
+
+
+class TestBacktestReportDelivery:
+    """Тайланг Telegram руу бүтнээр нь хүргэх.
+
+    send_telegram нь 4096 тэмдэгтээс хэтэрсэн мессежийг таслаад хаядаг тул
+    хэсэглэхгүй бол тайлангийн сүүл (жишиг харьцуулалт, тэмдэглэл) алга болно.
+    """
+
+    def test_a_short_report_goes_in_one_message(self, telegram_messages):
+        assert backtest.send_report_to_telegram("мөр 1\nмөр 2") == 1
+        assert len(telegram_messages) == 1
+
+    def test_a_long_report_is_split_and_nothing_is_lost(self, telegram_messages):
+        report = "\n".join(f"мөр {i:04d} " + "x" * 60 for i in range(300))
+
+        chunks = backtest.send_report_to_telegram(report)
+
+        assert chunks > 1
+        assert len(telegram_messages) == chunks
+        assert all(len(m) <= 4096 for m in telegram_messages)
+        assert "мөр 0000" in telegram_messages[0]
+        assert "мөр 0299" in telegram_messages[-1]
+
+    def test_no_markup_tags_are_sent_since_parse_mode_is_not_set(self, telegram_messages):
+        backtest.send_report_to_telegram("тайлан")
+
+        assert "<pre>" not in telegram_messages[0]

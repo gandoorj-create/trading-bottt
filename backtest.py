@@ -712,6 +712,30 @@ def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress
     return sim, format_report(sim, data)
 
 
+TELEGRAM_CHUNK = 3900
+
+
+def send_report_to_telegram(report):
+    """Тайланг Telegram-ын 4096 тэмдэгтийн хязгаарт багтаан хэсэглэж илгээнэ.
+
+    send_telegram нь parse_mode тавьдаггүй тул <pre> гэх мэт таг нь бичвэр
+    хэвээрээ харагдана — зүгээр л цэвэр текстээр илгээнэ. Хэсэглэхгүй бол
+    тайлангийн сүүл (жишиг харьцуулалт) таслагдана.
+    """
+    chunks, current = [], ""
+    for line in report.split("\n"):
+        if len(current) + len(line) + 1 > TELEGRAM_CHUNK:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+    if current.strip():
+        chunks.append(current)
+    for n, chunk in enumerate(chunks, 1):
+        header = f"🧪 BACKTEST {n}/{len(chunks)}\n" if len(chunks) > 1 else ""
+        notifications.send_telegram(header + chunk)
+    return len(chunks)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Ботын портфелийн backtest")
     parser.add_argument("--days", type=int, default=90, help="туршилтын хугацаа (өдөр)")
@@ -735,7 +759,7 @@ def main(argv=None):
         pd.DataFrame(sim["trades"]).to_csv(args.csv, index=False)
         print(f"\n💾 {len(sim['trades'])} арилжаа → {args.csv}")
     if sim and args.telegram:
-        notifications.send_telegram(f"<pre>{report}</pre>")
+        send_report_to_telegram(report)
     return 0 if sim else 1
 
 

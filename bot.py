@@ -116,7 +116,7 @@ def main():
             log.info("\n🧪 Портфелийн backtest ажиллуулж байна...")
             _sim, _report = backtest.run(days=BACKTEST_DAYS)
             log.info("\n" + _report)
-            notifications.send_telegram(f"<pre>{_report[:3500]}</pre>")
+            backtest.send_report_to_telegram(_report)
         except Exception as e:
             log.error(f"❌ Backtest error: {e}")
 
