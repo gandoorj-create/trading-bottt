@@ -214,6 +214,8 @@ def pick_candidates(analyses, correlation_fn):
                 continue
             if result["score"] < MIN_SIGNAL_SCORE:
                 continue
+            if ALLOWED_REGIMES and result.get("regime") not in ALLOWED_REGIMES:
+                continue
             candidates.append(result)
         if not candidates:
             continue

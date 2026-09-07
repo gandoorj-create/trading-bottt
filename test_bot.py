@@ -4056,3 +4056,162 @@ class TestBacktestRunPlumbing:
 
         assert sim is None
         assert "Өгөгдөл татагдсангүй" in report
+
+
+class TestBacktestSweep:
+    """Хэд хэдэн тохиргоог нэг шинжилгээний дамжлагаар харьцуулах.
+
+    Хамгийн чухал шалгуур: кэш ашигласан үр дүн нь кэшгүй ажиллуулсантай
+    ЯГ ижил байх. Эс тэгвээс хурдны төлөө үнэнээ алдана.
+    """
+
+    def test_a_cached_run_matches_an_uncached_one(self, synthetic_market):
+        plain = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+        cache = backtest.build_analysis_cache(synthetic_market, progress=False)
+        cached = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                                 analysis_cache=cache)
+
+        assert len(cached["trades"]) == len(plain["trades"])
+        assert cached["final_balance"] == pytest.approx(plain["final_balance"])
+        assert [t["symbol"] for t in cached["trades"]] == [t["symbol"] for t in plain["trades"]]
+
+    def test_the_cache_survives_a_stricter_threshold(self, monkeypatch, synthetic_market):
+        # Кэш нь MIN_SIGNAL_SCORE=0-оор баригддаг; жинхэнэ босго нь
+        # pick_candidates дотор тавигдана. Хоёр зам ижил үр дүн өгөх ёстой.
+        cache = backtest.build_analysis_cache(synthetic_market, progress=False)
+        patch_setting(monkeypatch, "MIN_SIGNAL_SCORE", 22.0)
+
+        plain = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+        cached = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                                 analysis_cache=cache)
+
+        assert len(cached["trades"]) == len(plain["trades"])
+        assert cached["final_balance"] == pytest.approx(plain["final_balance"])
+
+    def test_the_cache_survives_a_disabled_strategy(self, synthetic_market):
+        cache = backtest.build_analysis_cache(synthetic_market, progress=False)
+
+        plain = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                                disabled=["RSI_STRATEGY"])
+        cached = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                                 disabled=["RSI_STRATEGY"], analysis_cache=cache)
+
+        assert len(cached["trades"]) == len(plain["trades"])
+        assert cached["final_balance"] == pytest.approx(plain["final_balance"])
+
+    def test_building_the_cache_leaves_the_live_threshold_alone(self, monkeypatch, synthetic_market):
+        patch_setting(monkeypatch, "MIN_SIGNAL_SCORE", 17.0)
+
+        backtest.build_analysis_cache(synthetic_market, progress=False)
+
+        assert screening.MIN_SIGNAL_SCORE == pytest.approx(17.0)
+
+    def test_each_configuration_produces_its_own_result(self, synthetic_market):
+        configs = [
+            {"name": "жишиг"},
+            {"name": "өндөр босго", "min_score": 60.0},
+        ]
+
+        results = backtest.run_sweep(synthetic_market, 10_000.0, configs=configs, progress=False)
+
+        assert [r["name"] for r in results] == ["жишиг", "өндөр босго"]
+        assert len(results[1]["trades"]) < len(results[0]["trades"])
+
+    def test_a_regime_filter_only_keeps_that_regime(self, synthetic_market):
+        results = backtest.run_sweep(
+            synthetic_market, 10_000.0, progress=False,
+            configs=[{"name": "зөвхөн TRANSITION", "regimes": ["TRANSITION"]}])
+
+        assert all(t["regime"] == "TRANSITION" for t in results[0]["trades"])
+
+    def test_overrides_are_restored_after_the_sweep(self, monkeypatch, synthetic_market):
+        patch_setting(monkeypatch, "MIN_SIGNAL_SCORE", 14.0)
+        patch_setting(monkeypatch, "PARTIAL_TP_ENABLED", True)
+
+        backtest.run_sweep(synthetic_market, 10_000.0, progress=False,
+                           configs=[{"name": "x", "min_score": 99.0, "partial_tp": False,
+                                     "regimes": ["STRONG_TREND"]}])
+
+        assert screening.MIN_SIGNAL_SCORE == pytest.approx(14.0)
+        assert screening.ALLOWED_REGIMES == []
+        assert backtest.PARTIAL_TP_ENABLED is True
+
+    def test_the_comparison_report_ranks_the_configurations(self, synthetic_market):
+        results = backtest.run_sweep(
+            synthetic_market, 10_000.0, progress=False,
+            configs=[{"name": "жишиг"}, {"name": "өндөр босго", "min_score": 60.0}])
+
+        report = backtest.format_sweep_report(results, synthetic_market)
+
+        assert "ХУВИЛБАРУУДЫН ХАРЬЦУУЛАЛТ" in report
+        assert "🥇 Хамгийн сайн:" in report
+        assert "ЖИНХЭНЭ БОТ ХЭЗЭЭ ЗОГСОХ БАЙСАН" in report
+        assert "ӨӨР хугацаан дээр заавал" in report      # overfitting сануулга
+
+
+class TestBacktestSweepCacheFidelity:
+    """Кэш нь ямар ч тохиргоонд тохирох ёстой.
+
+    analyze_frame нь босгоос доош онооны signal-ыг HOLD болгож, идэвхгүй
+    стратегиудыг алгасдаг. Хэрэв кэшийг тухайн үеийн амьд тохиргоогоор
+    барьвал, түүнээс СУЛ тохиргоо туршихад арилжаанууд чимээгүй алга болж,
+    "энэ хувилбар муу" гэсэн худал дүгнэлт гарна.
+    """
+
+    def test_a_cache_built_under_a_strict_threshold_still_serves_a_loose_one(
+        self, monkeypatch, synthetic_market
+    ):
+        patch_setting(monkeypatch, "MIN_SIGNAL_SCORE", 40.0)     # хатуу үед барина
+        cache = backtest.build_analysis_cache(synthetic_market, progress=False)
+        patch_setting(monkeypatch, "MIN_SIGNAL_SCORE", 5.0)      # сул үед ашиглана
+
+        plain = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+        cached = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                                 analysis_cache=cache)
+
+        assert len(plain["trades"]) > 0
+        assert len(cached["trades"]) == len(plain["trades"])
+        assert cached["final_balance"] == pytest.approx(plain["final_balance"])
+
+    def test_a_strategy_paused_live_is_still_in_the_cache(self, synthetic_market):
+        # Амьд бот дараалсан алдагдлын дараа стратегийг унтраадаг. Тэр мөчид
+        # backtest ажиллуулбал кэш түүнгүйгээр баригдаж, дараагийн хувилбарууд
+        # тэр стратегийг хэзээ ч харахгүй.
+        bot_state.strategy_stats["RSI_STRATEGY"]["active"] = False
+        cache = backtest.build_analysis_cache(synthetic_market, progress=False)
+
+        cached = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                                 analysis_cache=cache)
+
+        assert any(t["strategy"] == "RSI_STRATEGY" for t in cached["trades"])
+
+    def test_building_the_cache_leaves_paused_strategies_paused(self, synthetic_market):
+        bot_state.strategy_stats["RSI_STRATEGY"]["active"] = False
+
+        backtest.build_analysis_cache(synthetic_market, progress=False)
+
+        assert bot_state.strategy_stats["RSI_STRATEGY"]["active"] is False
+
+
+class TestBacktestSweepPartialTp:
+    """partial_tp хувилбар үнэхээр зан төлөвийг өөрчилж байгаа эсэх."""
+
+    def test_turning_partial_tp_off_removes_the_partial_fills(self, synthetic_market):
+        results = backtest.run_sweep(
+            synthetic_market, 10_000.0, progress=False,
+            configs=[{"name": "on", "partial_tp": True},
+                     {"name": "off", "partial_tp": False}])
+        on, off = results
+
+        assert any(t["partial_hit"] for t in on["trades"])
+        assert not any(t["partial_hit"] for t in off["trades"])
+
+    def test_turning_partial_tp_off_removes_breakeven_exits(self, synthetic_market):
+        results = backtest.run_sweep(
+            synthetic_market, 10_000.0, progress=False,
+            configs=[{"name": "on", "partial_tp": True},
+                     {"name": "off", "partial_tp": False}])
+        on, off = results
+
+        assert any(t["exit_reason"] == "BREAKEVEN" for t in on["trades"])
+        assert not any(t["exit_reason"] == "BREAKEVEN" for t in off["trades"])

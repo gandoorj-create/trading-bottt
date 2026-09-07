@@ -44,6 +44,7 @@
   "close_verify_delay_sec": 2,
 
   "min_signal_score": 14.0,
+  "allowed_regimes": [],
   "min_balance_usdt": 10.0,
   "max_total_margin_usage": 0.55,
   "max_session_drawdown_pct": 15.0,

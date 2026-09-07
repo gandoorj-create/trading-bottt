@@ -448,6 +448,71 @@ def _row_at(df, index):
     return df.iloc[index]
 
 
+def _analyses_at(data, symbols, index_by_time, t):
+    """Тухайн мөчид бүх symbol-ийн шинжилгээ. Ботын жинхэнэ analyze_frame."""
+    analyses = []
+    for symbol in symbols:
+        i = index_by_time[symbol].get(t)
+        if i is None or i + 1 < SIGNAL_WINDOW:
+            continue
+        df = data[symbol]["signal"].iloc[max(0, i + 1 - SIGNAL_WINDOW):i + 1]
+        if len(df) < 210:
+            continue
+        result = screening.analyze_frame(
+            symbol, df, _mtf_for(df), _funding_at(data[symbol]["funding"], t)
+        )
+        if result:
+            analyses.append(result)
+    return analyses
+
+
+@contextmanager
+def neutral_screening():
+    """Шинжилгээг тохиргооноос ХАМААРАЛГҮЙ болгоно.
+
+    analyze_frame нь MIN_SIGNAL_SCORE-оос доош онооны signal-ыг HOLD болгодог,
+    мөн идэвхгүй стратегиудыг алгасдаг. Кэшийг бүх тохиргоонд тохирохоор
+    барихын тулд босгыг 0, бүх стратегийг идэвхтэй болгоно — жинхэнэ шүүлт нь
+    pick_candidates дотор хийгддэг тул үр дүн ижил хэвээр.
+    """
+    saved = screening.MIN_SIGNAL_SCORE
+    saved_active = {name: state.strategy_stats[name]["active"] for name in STRATEGY_NAMES}
+    screening.MIN_SIGNAL_SCORE = 0.0
+    for name in STRATEGY_NAMES:
+        state.strategy_stats[name]["active"] = True
+    try:
+        yield
+    finally:
+        screening.MIN_SIGNAL_SCORE = saved
+        for name, value in saved_active.items():
+            state.strategy_stats[name]["active"] = value
+
+
+def build_analysis_cache(data, progress=True):
+    """Бүх мөчлөгийн шинжилгээг НЭГ удаа тооцоолж кэшилнэ.
+
+    Энэ нь симуляцын хугацааны ~85%-ыг эзэлдэг бөгөөд тохиргооноос
+    хамаардаггүй тул хэд хэдэн хувилбар турших үед дахин тооцоолох нь цэвэр
+    үрэлгэн байдал: 5 хувилбар × 11 мин биш, 11 мин + 5 × 2 мин.
+    """
+    symbols = list(data)
+    master = sorted(set().union(*[set(d["signal"]["time"]) for d in data.values()]))
+    index_by_time = {sym: dict(zip(d["signal"]["time"], range(len(d["signal"]))))
+                     for sym, d in data.items()}
+    selection_every = max(1, int(SELECTION_INTERVAL_MINUTES // 60))
+    first, last = SIGNAL_WINDOW, len(master) - 2
+
+    cache = {}
+    with neutral_screening():
+        for n, mi in enumerate(range(first, last + 1, selection_every)):
+            t = master[mi]
+            cache[t] = _analyses_at(data, symbols, index_by_time, t)
+            if progress and n and n % 50 == 0:
+                done = (mi - first) / max(1, last - first) * 100
+                log.info(f"   шинжилгээ {done:5.1f}%")
+    return cache
+
+
 def _group_exec_bars(df, interval):
     """Гарц шийдэх лааг цагаар нь бүлэглэнэ (1h бар → дэд лаанууд)."""
     grouped = {}
@@ -457,11 +522,14 @@ def _group_exec_bars(df, interval):
     return grouped
 
 
-def run_portfolio_backtest(data, start_balance, progress=True, disabled=None, halt_on_drawdown=True):
+def run_portfolio_backtest(data, start_balance, progress=True, disabled=None,
+                           halt_on_drawdown=True, analysis_cache=None):
     """Ботын бүх мөчлөгийг түүхэн өгөгдөл дээр давтана.
 
     disabled: тухайн ажиллагаанд оролцуулахгүй стратегиудын нэр. `paused_cycles`
     нь 0 хэвээр тул update_strategy_cooldowns тэднийг дахин асаахгүй.
+    analysis_cache: build_analysis_cache-ийн үр дүн. Байвал лаа дахин
+    шинжлэхгүй — олон хувилбар харьцуулахад л ялгаа гаргана.
     halt_on_drawdown: False үед circuit breaker унтарна. Одоогийн тохиргоогоор
     бот эхний долоо хоногт хязгаартаа хүрч зогсдог тул урт хугацааны зан төлөв
     хэмжигдэхгүй байсан — ямар ч `--days` утга ижил долоо хоногийг л хэмждэг.
@@ -522,19 +590,10 @@ def run_portfolio_backtest(data, start_balance, progress=True, disabled=None, ha
             if (mi - first) % selection_every == 0 and not state.safety_lock:
                 cycles += 1
                 risk.update_strategy_cooldowns()
-                analyses = []
-                for symbol in symbols:
-                    i = index_by_time[symbol].get(t)
-                    if i is None or i + 1 < SIGNAL_WINDOW:
-                        continue
-                    df = data[symbol]["signal"].iloc[max(0, i + 1 - SIGNAL_WINDOW):i + 1]
-                    if len(df) < 210:
-                        continue
-                    result = screening.analyze_frame(
-                        symbol, df, _mtf_for(df), _funding_at(data[symbol]["funding"], t)
-                    )
-                    if result:
-                        analyses.append(result)
+                if analysis_cache is not None:
+                    analyses = analysis_cache.get(t, [])
+                else:
+                    analyses = _analyses_at(data, symbols, index_by_time, t)
 
                 corr_fn.time = t
                 selected, _, _ = screening.pick_candidates(analyses, corr_fn)
@@ -640,6 +699,135 @@ def run_portfolio_backtest(data, start_balance, progress=True, disabled=None, ha
     sim["halt_enabled"] = halt_on_drawdown
     sim["breach_ms"] = _drawdown_breach_ms(sim["equity_curve"], MAX_SESSION_DRAWDOWN_PCT)
     return sim
+
+
+# ----------------------------------------------------------------
+# Хувилбар харьцуулах (sweep)
+# ----------------------------------------------------------------
+
+@contextmanager
+def config_overrides(min_score=None, regimes=None, partial_tp=None):
+    """Тухайн хувилбарын тохиргоог түр хүчинтэй болгоно.
+
+    Тогтмолууд `from settings import *`-аар модуль тус бүрд хуулбарлагддаг тул
+    уншиж буй модульд нь шууд тавина, дараа нь буцаана.
+    """
+    saved = (screening.MIN_SIGNAL_SCORE, screening.ALLOWED_REGIMES, globals()["PARTIAL_TP_ENABLED"])
+    if min_score is not None:
+        screening.MIN_SIGNAL_SCORE = min_score
+    if regimes is not None:
+        screening.ALLOWED_REGIMES = regimes
+    if partial_tp is not None:
+        globals()["PARTIAL_TP_ENABLED"] = partial_tp
+    try:
+        yield
+    finally:
+        screening.MIN_SIGNAL_SCORE, screening.ALLOWED_REGIMES = saved[0], saved[1]
+        globals()["PARTIAL_TP_ENABLED"] = saved[2]
+
+
+DEFAULT_SWEEP = [
+    {"name": "жишиг (одоогийн)"},
+    {"name": "зөвхөн STRONG_TREND", "regimes": ["STRONG_TREND"]},
+    {"name": "trend горимууд", "regimes": ["STRONG_TREND", "TRENDING"]},
+    {"name": "partial TP унтраасан", "partial_tp": False},
+    {"name": "min_score 24", "min_score": 24.0},
+    {"name": "STRONG_TREND + partial TP off", "regimes": ["STRONG_TREND"], "partial_tp": False},
+]
+
+
+def run_sweep(data, start_balance, configs=None, disabled=None,
+              halt_on_drawdown=False, progress=True):
+    """Хэд хэдэн тохиргоог НЭГ шинжилгээний дамжлагаар харьцуулна.
+
+    Лаа шинжлэх нь симуляцын хугацааны ~85%-ыг эзэлдэг ба тохиргооноос
+    хамаардаггүй. Тиймээс нэг удаа тооцоолоод бүх хувилбарт хуваалцвал
+    6 хувилбар нь 6 дахин биш, ~1.9 дахин удаан болно.
+    """
+    configs = configs or DEFAULT_SWEEP
+    if progress:
+        log.info(f"🔬 {len(configs)} хувилбар | шинжилгээг нэг удаа тооцоолж хуваалцана")
+    cache = build_analysis_cache(data, progress=progress)
+
+    results = []
+    for n, cfg in enumerate(configs, 1):
+        if progress:
+            log.info(f"   [{n}/{len(configs)}] {cfg['name']}")
+        with config_overrides(cfg.get("min_score"), cfg.get("regimes"), cfg.get("partial_tp")):
+            sim = run_portfolio_backtest(
+                data, start_balance, progress=False,
+                disabled=cfg.get("disabled", disabled),
+                halt_on_drawdown=cfg.get("halt", halt_on_drawdown),
+                analysis_cache=cache,
+            )
+        sim["name"] = cfg["name"]
+        results.append(sim)
+    return results
+
+
+def format_sweep_report(results, data=None):
+    lines = []
+    add = lines.append
+
+    def when(ms):
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    first = results[0]
+    days = (first["to_ms"] - first["from_ms"]) / (24 * HOUR_MS)
+    add("=" * 78)
+    add(f"ХУВИЛБАРУУДЫН ХАРЬЦУУЛАЛТ   {when(first['from_ms'])} → {when(first['to_ms'])}")
+    add(f"{len(first['symbols'])} coin | {MAX_SELECTIONS} слот | {LEVERAGE}x | ${first['start_balance']:,.0f}")
+    if first.get("disabled"):
+        add(f"Унтраасан стратеги: {', '.join(first['disabled'])}")
+    add("=" * 78)
+    add("")
+    add(f"  {'хувилбар':<32}{'n':>5}{'win%':>7}{'өгөөж':>9}{'expect$':>9}{'DD%':>7}{'PF':>6}")
+    add("  " + "-" * 74)
+
+    for sim in results:
+        trades = sim["trades"]
+        ret = (sim["final_balance"] - sim["start_balance"]) / sim["start_balance"] * 100
+        if not trades:
+            add(f"  {sim['name']:<32}{0:>5}{'—':>7}{ret:>8.2f}%{'—':>9}{'—':>7}{'—':>6}")
+            continue
+        nets = np.array([t["net"] for t in trades], dtype=float)
+        wins, losses = nets[nets > 0], nets[nets < 0]
+        pf = wins.sum() / abs(losses.sum()) if len(losses) and losses.sum() else float("inf")
+        add(f"  {sim['name']:<32}{len(trades):>5}{(nets > 0).mean() * 100:>6.0f}%"
+            f"{ret:>8.2f}%{nets.mean():>9.2f}{_max_drawdown(sim['equity_curve']):>6.1f}%{pf:>6.2f}")
+
+    add("")
+    add("─ ЖИНХЭНЭ БОТ ХЭЗЭЭ ЗОГСОХ БАЙСАН (15% breaker) ─────────────────────────────")
+    for sim in results:
+        breach = sim.get("breach_ms")
+        if breach:
+            day = (breach - sim["from_ms"]) / (24 * HOUR_MS)
+            add(f"  {sim['name']:<32}{when(breach)}  ({day:.0f} дахь өдөр)")
+        else:
+            add(f"  {sim['name']:<32}зогсохгүй")
+
+    add("")
+    add("─ ЗАРДЛЫН ЭЗЛЭХ ХУВЬ ───────────────────────────────────────────────────────")
+    add(f"  {'хувилбар':<32}{'gross$':>10}{'шимтгэл$':>11}{'funding$':>10}{'net$':>10}")
+    for sim in results:
+        add(f"  {sim['name']:<32}{sim['total_gross']:>10.0f}{-sim['total_fees']:>11.0f}"
+            f"{-sim['total_funding']:>10.0f}{sim['final_balance'] - sim['start_balance']:>10.0f}")
+
+    if data:
+        bh = _buy_and_hold(data, first["from_ms"], first["to_ms"])
+        if bh is not None:
+            add("")
+            add(f"ЖИШИГ: BTC зүгээр барьсан бол {bh:+.2f}% ({days:.0f} хоног)")
+
+    best = max(results, key=lambda s: s["final_balance"])
+    add("")
+    add(f"🥇 Хамгийн сайн: {best['name']} "
+        f"({(best['final_balance'] - best['start_balance']) / best['start_balance'] * 100:+.2f}%)")
+    add("")
+    add("⚠️ Эдгээрийг НЭГ хугацаанаас сонгож байгаа тул хамгийн сайн нь зүгээр л")
+    add("   тэр хугацаанд таарсан байж болно. Ялагчийг ӨӨР хугацаан дээр заавал")
+    add("   шалгах ёстой — эс тэгвээс түүхийг цээжилсэн үр дүн авна.")
+    return "\n".join(lines)
 
 
 # ----------------------------------------------------------------
@@ -863,6 +1051,24 @@ def send_report_to_telegram(report):
     return len(chunks)
 
 
+def run_sweep_cli(days=90, start_balance=None, symbols=None, exec_interval="15m",
+                  data_url=None, disabled=None, halt_on_drawdown=False, progress=True):
+    """Sweep-ийн өгөгдөл ачаалах + ажиллуулах + тайлагнах."""
+    symbols = symbols or SYMBOLS_POOL
+    data = load_history(symbols, days, exec_interval=exec_interval, progress=progress,
+                        data_url=data_url)
+    if not data:
+        return None, "❌ Өгөгдөл татагдсангүй."
+    if start_balance is None:
+        try:
+            start_balance = account.get_usdt_balance() or 10_000.0
+        except Exception:
+            start_balance = 10_000.0
+    results = run_sweep(data, start_balance, disabled=disabled,
+                        halt_on_drawdown=halt_on_drawdown, progress=progress)
+    return results, format_sweep_report(results, data)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Ботын портфелийн backtest")
     parser.add_argument("--days", type=int, default=90, help="туршилтын хугацаа (өдөр)")
@@ -870,6 +1076,8 @@ def main(argv=None):
     parser.add_argument("--symbols", type=str, default=None, help="таслалаар тусгаарласан symbol-ууд")
     parser.add_argument("--exec-interval", type=str, default="15m",
                         help="гарц шийдэх лааны давтамж (15m/5m). 1h нь хамгийн бүдүүлэг.")
+    parser.add_argument("--sweep", action="store_true",
+                        help="хэд хэдэн тохиргоог нэг ажиллагаагаар харьцуулна")
     parser.add_argument("--no-halt", action="store_true",
                         help="drawdown circuit breaker-ыг унтраан бүтэн хугацааг хэмжинэ")
     parser.add_argument("--disable", type=str, default=None,
@@ -891,6 +1099,20 @@ def main(argv=None):
         if unknown:
             parser.error(f"Ийм стратеги алга: {', '.join(unknown)}. "
                          f"Боломжтой: {', '.join(STRATEGY_NAMES)}")
+
+    if args.sweep:
+        # Sweep нь breaker-ыг ҮРГЭЛЖ унтраана: хувилбарууд өөр өөр өдөр зогсвол
+        # тус бүр нь өөр хугацаа хэмжиж, харьцуулалт утгагүй болно. Аль нь
+        # хэзээ зогсох байсныг тайлан тус тусад нь хэлнэ.
+        results, report = run_sweep_cli(
+            days=args.days, start_balance=args.balance, symbols=symbols,
+            exec_interval=args.exec_interval, data_url=args.data_url,
+            disabled=disabled, halt_on_drawdown=False,
+        )
+        print(report)
+        if results and args.telegram:
+            send_report_to_telegram(report)
+        return 0 if results else 1
 
     sim, report = run(days=args.days, start_balance=args.balance, symbols=symbols,
                       exec_interval=args.exec_interval, data_url=args.data_url,

@@ -88,6 +88,10 @@ CLOSE_VERIFY_ATTEMPTS = _cfg["close_verify_attempts"]
 CLOSE_VERIFY_DELAY_SEC = _cfg["close_verify_delay_sec"]
 
 MIN_SIGNAL_SCORE = _cfg["min_signal_score"]
+# Зөвхөн эдгээр зах зээлийн горимд арилжаална. Хоосон = бүх горимд.
+# Backtest дээр STRONG_TREND л эерэг expectancy өгсөн (65% win, +$9.23/арилжаа)
+# бол бусад нь алдагдалтай байсан тул энэ хаалга бодит утгатай.
+ALLOWED_REGIMES = _cfg.get("allowed_regimes", [])
 MIN_BALANCE_USDT = _cfg["min_balance_usdt"]
 MAX_TOTAL_MARGIN_USAGE = _cfg["max_total_margin_usage"]
 MAX_SESSION_DRAWDOWN_PCT = _cfg.get("max_session_drawdown_pct", 0.0)
