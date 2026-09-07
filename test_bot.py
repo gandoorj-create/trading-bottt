@@ -3877,3 +3877,51 @@ class TestBacktestStrategyDisable:
                                         disabled=["RSI_STRATEGY"])
 
         assert bot_state.strategy_stats["RSI_STRATEGY"]["active"] is True
+
+
+class TestBacktestCli:
+    """CLI-ийн аргументууд симуляц хүртэл үнэхээр хүрч байгаа эсэх.
+
+    Хөдөлгүүр зөв ажиллаж байхад CLI давхарга дээр тасарвал хэрэглэгч
+    тохиргоогоо өөрчиллөө гэж бодоод, үнэндээ хуучин үр дүнгээ дахин авна.
+    """
+
+    @pytest.fixture
+    def cli(self, monkeypatch):
+        seen = {}
+
+        def fake_run(**kwargs):
+            seen.update(kwargs)
+            return {"trades": []}, "тайлан"
+
+        monkeypatch.setattr(backtest, "run", fake_run)
+        monkeypatch.setattr(backtest, "setup_logging", lambda *a, **kw: None)
+        monkeypatch.setattr(binance_client, "sync_server_time", lambda: None)
+        return seen
+
+    def test_disable_reaches_the_simulation(self, cli):
+        backtest.main(["--days", "90", "--disable", "MACD_MOMENTUM,BREAKOUT"])
+
+        assert cli["disabled"] == ["MACD_MOMENTUM", "BREAKOUT"]
+
+    def test_disable_is_case_insensitive_and_trims_spaces(self, cli):
+        backtest.main(["--disable", " macd_momentum , breakout "])
+
+        assert cli["disabled"] == ["MACD_MOMENTUM", "BREAKOUT"]
+
+    def test_no_disable_flag_means_every_strategy_runs(self, cli):
+        backtest.main(["--days", "30"])
+
+        assert cli["disabled"] is None
+
+    def test_an_unknown_strategy_name_is_refused(self, cli):
+        # Алдаатай нэрийг чимээгүй алгасвал хэрэглэгч унтраасан гэж бодоод
+        # үнэндээ бүрэн ажиллагааны үр дүн авна
+        with pytest.raises(SystemExit):
+            backtest.main(["--disable", "MACD_MOMENTM"])
+
+    def test_days_and_balance_reach_the_simulation(self, cli):
+        backtest.main(["--days", "45", "--balance", "6356"])
+
+        assert cli["days"] == 45
+        assert cli["start_balance"] == pytest.approx(6356.0)
