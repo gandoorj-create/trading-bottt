@@ -199,6 +199,7 @@ print(d.groupby(pd.cut(d.score,[0,16,20,25,100])).pnl.agg(['count','sum','mean']
 python backtest.py --days 90                 # сүүлийн 90 өдөр, жинхэнэ дансны балансаар
 python backtest.py --days 180 --balance 6000 --csv trades_bt.csv
 python backtest.py --days 30 --exec-interval 5m --telegram
+python backtest.py --days 90 --disable MACD_MOMENTUM,BREAKOUT   # тодорхой стратегигүйгээр
 ```
 
 **Гол зарчим: дуурайхгүй, ботын кодыг өөрийг нь ажиллуулна.** Симуляц нь
@@ -242,6 +243,14 @@ python backtest.py --days 30 --exec-interval 5m --telegram
 
 Liquidation, захиалгын хэсэгчилсэн биелэлт, exchange info-гийн тоймлолт
 (`stepSize`/`minNotional`), maker/taker шатлал, биржийн тасалдал.
+
+### Эрт зогссон ажиллагаа
+
+Drawdown circuit breaker буудвал симуляц тэр цэгтээ зогсоно. Тайлан бүх
+өгөгдлийн хугацаагаар биш, **үнэхээр арилжаа хийсэн хугацаагаар** хэмжинэ —
+эс тэгвээс "сард X%" ба BTC-тэй харьцуулалт хоёулаа арилжаагүй өдрүүдийг
+тоолж, ботыг байснаас нь дээр харагдуулна. Толгойд нь хэдэн хоногийн
+өгөгдлийн хэд дэх өдөр дээр зогссоныг бичнэ.
 
 ### Тайлан юу хэлэх вэ
 

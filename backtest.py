@@ -451,8 +451,12 @@ def _group_exec_bars(df, interval):
     return grouped
 
 
-def run_portfolio_backtest(data, start_balance, progress=True):
-    """Ботын бүх мөчлөгийг түүхэн өгөгдөл дээр давтана."""
+def run_portfolio_backtest(data, start_balance, progress=True, disabled=None):
+    """Ботын бүх мөчлөгийг түүхэн өгөгдөл дээр давтана.
+
+    disabled: тухайн ажиллагаанд оролцуулахгүй стратегиудын нэр. `paused_cycles`
+    нь 0 хэвээр тул update_strategy_cooldowns тэднийг дахин асаахгүй.
+    """
     symbols = list(data)
     if not symbols:
         return None
@@ -475,6 +479,11 @@ def run_portfolio_backtest(data, start_balance, progress=True):
     last = len(master) - 2
     halted_reason = None
     cycles = 0
+    # Симуляц эрт зогсож болно (drawdown halt). Тайлан бүх өгөгдлийн хугацаагаар
+    # хуваавал "сард X%" ба BTC-тэй харьцуулалт хоёулаа гуйвна — арилжаа
+    # хийгээгүй өдрүүдийг тоолно гэсэн үг. Тиймээс үнэхээр боловсруулсан
+    # сүүлийн барыг хөтөлж, тайланг түүгээр хэмжинэ.
+    last_processed_ms = master[first]
 
     with simulation_mode(equity):
         # Snapshot аль хэдийн авагдсаны ДАРАА цэвэрлэнэ — эс тэгвээс амьд
@@ -482,6 +491,8 @@ def run_portfolio_backtest(data, start_balance, progress=True):
         state.reset()
         state.session_start_balance = start_balance
         state.session_peak_balance = start_balance
+        for name in (disabled or []):
+            state.strategy_stats[name]["active"] = False
 
         for mi in range(first, last + 1):
             t = master[mi]
@@ -561,6 +572,7 @@ def run_portfolio_backtest(data, start_balance, progress=True):
 
             # (5) барын хаалт: хугацааны stop, зорилт, drawdown
             bar_close_ms = next_t + HOUR_MS
+            last_processed_ms = bar_close_ms
             for symbol, pos in list(sim["open"].items()):
                 if MAX_HOLD_HOURS <= 0:
                     break
@@ -609,8 +621,11 @@ def run_portfolio_backtest(data, start_balance, progress=True):
     sim["halted"] = halted_reason
     sim["cycles"] = cycles
     sim["from_ms"] = master[first]
-    sim["to_ms"] = master[-1]
+    sim["to_ms"] = last_processed_ms
+    # Өгөгдөл хаана дуусахыг тусад нь хадгална: эрт зогссоныг харуулахад хэрэгтэй
+    sim["data_to_ms"] = master[-1] + HOUR_MS
     sim["symbols"] = symbols
+    sim["disabled"] = sorted(disabled or [])
     return sim
 
 
@@ -672,6 +687,12 @@ def format_report(sim, data=None):
     add("=" * 72)
     add(f"ПОРТФЕЛИЙН BACKTEST   {when(sim['from_ms'])} → {when(sim['to_ms'])}  ({days:.0f} өдөр)")
     add(f"{len(sim['symbols'])} coin | {MAX_SELECTIONS} слот | {LEVERAGE}x | min_score={MIN_SIGNAL_SCORE}")
+    if sim.get("disabled"):
+        add(f"Унтраасан стратеги: {', '.join(sim['disabled'])}")
+    data_days = (sim.get("data_to_ms", sim["to_ms"]) - sim["from_ms"]) / (24 * HOUR_MS)
+    if data_days - days > 1:
+        add(f"⚠️ {data_days:.0f} хоногийн өгөгдлөөс {days:.0f} дахь өдөр дээр ЗОГССОН — "
+            f"доорх бүх тоо тэр {days:.0f} хоногийнх")
     add("=" * 72)
 
     if not trades:
@@ -695,7 +716,7 @@ def format_report(sim, data=None):
     add(f"Max drawdown   {_max_drawdown(sim['equity_curve']):.2f}%")
     add(f"Дундаж барилт  {np.mean([t['hold_hours'] for t in trades]):.1f} цаг")
     if sim.get("halted"):
-        add(f"⚠️ ЗОГССОН: {sim['halted']}")
+        add(f"⚠️ ЗОГССОН: {sim['halted']} ({when(sim['to_ms'])})")
 
     add("")
     add("─ ЗАРДЛЫН ЗАДАРГАА ─────────────────────────────────────────────────")
@@ -757,7 +778,8 @@ def format_report(sim, data=None):
 # CLI
 # ----------------------------------------------------------------
 
-def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress=True, data_url=None):
+def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress=True,
+        data_url=None, disabled=None):
     symbols = symbols or SYMBOLS_POOL
     data = load_history(symbols, days, exec_interval=exec_interval, progress=progress, data_url=data_url)
     if not data:
@@ -768,7 +790,7 @@ def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress
         except Exception:
             start_balance = 10_000.0
     log.info(f"🧪 Симуляц эхэллээ: {len(data)} coin, ${start_balance:,.0f}")
-    sim = run_portfolio_backtest(data, start_balance, progress=progress)
+    sim = run_portfolio_backtest(data, start_balance, progress=progress, disabled=disabled)
     if not sim:
         return None, "❌ Симуляц ажиллаагүй."
     return sim, format_report(sim, data)
@@ -805,6 +827,8 @@ def main(argv=None):
     parser.add_argument("--symbols", type=str, default=None, help="таслалаар тусгаарласан symbol-ууд")
     parser.add_argument("--exec-interval", type=str, default="15m",
                         help="гарц шийдэх лааны давтамж (15m/5m). 1h нь хамгийн бүдүүлэг.")
+    parser.add_argument("--disable", type=str, default=None,
+                        help="оролцуулахгүй стратегиуд, таслалаар (ж: MACD_MOMENTUM,BREAKOUT)")
     parser.add_argument("--data-url", type=str, default=None,
                         help=f"түүхэн өгөгдлийн эндпойнт (анхдагч: {BACKTEST_DATA_URL})")
     parser.add_argument("--csv", type=str, default=None, help="арилжаа бүрийг CSV-д бичих зам")
@@ -815,8 +839,17 @@ def main(argv=None):
     binance_client.sync_server_time()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
+    disabled = None
+    if args.disable:
+        disabled = [name.strip().upper() for name in args.disable.split(",") if name.strip()]
+        unknown = [name for name in disabled if name not in STRATEGY_NAMES]
+        if unknown:
+            parser.error(f"Ийм стратеги алга: {', '.join(unknown)}. "
+                         f"Боломжтой: {', '.join(STRATEGY_NAMES)}")
+
     sim, report = run(days=args.days, start_balance=args.balance, symbols=symbols,
-                      exec_interval=args.exec_interval, data_url=args.data_url)
+                      exec_interval=args.exec_interval, data_url=args.data_url,
+                      disabled=disabled)
     print(report)
 
     if sim and args.csv:

@@ -3786,3 +3786,94 @@ class TestExecBarsConsistency:
 
         assert data["BTCUSDT"]["exec_interval"] == "1h"
         assert len(data["BTCUSDT"]["exec"]) == len(hourly)
+
+
+class TestBacktestHaltedPeriod:
+    """Эрт зогссон симуляцыг бүх өгөгдлийн хугацаагаар хэмжиж болохгүй.
+
+    Drawdown halt нь 91 хоногийн 30 дахь өдөр дээр буудаг бол "сард X%" ба
+    BTC-тэй харьцуулалт хоёулаа арилжаа хийгээгүй 61 хоногийг тоолж, ботыг
+    байснаас нь дөрөв дахин дээр харагдуулна.
+    """
+
+    def _halting_market(self, monkeypatch, synthetic_market):
+        patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 0.5)   # шууд буудна
+        return synthetic_market
+
+    def test_the_measured_period_ends_where_trading_stopped(self, monkeypatch, synthetic_market):
+        self._halting_market(monkeypatch, synthetic_market)
+
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert sim["halted"] == "DRAWDOWN_HALT"
+        assert sim["to_ms"] < sim["data_to_ms"]
+
+    def test_a_completed_run_measures_the_whole_dataset(self, monkeypatch, synthetic_market):
+        patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 0.0)
+
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        assert sim["halted"] is None
+        assert sim["to_ms"] == pytest.approx(sim["data_to_ms"], abs=3_600_000)
+
+    def test_the_report_says_the_run_was_cut_short(self, monkeypatch, synthetic_market):
+        self._halting_market(monkeypatch, synthetic_market)
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+
+        report = backtest.format_report(sim, synthetic_market)
+
+        assert "ЗОГССОН" in report
+        assert "дахь өдөр дээр ЗОГССОН" in report
+
+    def test_the_benchmark_covers_the_same_window_as_the_bot(self, monkeypatch, synthetic_market):
+        self._halting_market(monkeypatch, synthetic_market)
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+        captured = {}
+        real = backtest._buy_and_hold
+
+        def spy(data, from_ms, to_ms, symbol="BTCUSDT"):
+            captured["to_ms"] = to_ms
+            return real(data, from_ms, to_ms, symbol)
+
+        monkeypatch.setattr(backtest, "_buy_and_hold", spy)
+        backtest.format_report(sim, synthetic_market)
+
+        assert captured["to_ms"] == sim["to_ms"]        # өгөгдлийн төгсгөл БИШ
+
+
+class TestBacktestStrategyDisable:
+    """Тодорхой стратегийг унтрааж, үлдсэн нь дангаараа ямар үр дүн өгөхийг харах."""
+
+    def test_a_disabled_strategy_never_trades(self, synthetic_market):
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                              disabled=["RSI_STRATEGY"])
+
+        assert all(t["strategy"] != "RSI_STRATEGY" for t in sim["trades"])
+
+    def test_disabling_changes_which_trades_are_taken(self, synthetic_market):
+        full = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False)
+        cut = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                              disabled=["RSI_STRATEGY"])
+
+        assert any(t["strategy"] == "RSI_STRATEGY" for t in full["trades"])
+        assert len(cut["trades"]) < len(full["trades"])
+
+    def test_a_cooldown_cannot_reactivate_a_disabled_strategy(self, synthetic_market):
+        # update_strategy_cooldowns нь paused_cycles > 0 үед л дахин асаадаг.
+        # Унтраахдаа paused_cycles-ыг хөндөхгүй тул мөчлөгийн туршид унтарсан хэвээр.
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                              disabled=["RSI_STRATEGY", "MACD_MOMENTUM"])
+
+        assert all(t["strategy"] not in ("RSI_STRATEGY", "MACD_MOMENTUM") for t in sim["trades"])
+
+    def test_the_report_names_what_was_disabled(self, synthetic_market):
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                              disabled=["RSI_STRATEGY"])
+
+        assert "Унтраасан стратеги: RSI_STRATEGY" in backtest.format_report(sim, synthetic_market)
+
+    def test_live_strategy_stats_are_still_untouched(self, synthetic_market):
+        backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                        disabled=["RSI_STRATEGY"])
+
+        assert bot_state.strategy_stats["RSI_STRATEGY"]["active"] is True
