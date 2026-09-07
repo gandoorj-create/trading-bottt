@@ -4445,3 +4445,133 @@ class TestSweepWinnerExcludesBreaches:
         report = backtest.format_sweep_report(results)
 
         assert "🥇 Хамгийн сайн (хүрэх боломжтой): хүчтэй" in report
+
+
+class TestWalkForward:
+    """Олон давхцаагүй цонхон дээр давтах.
+
+    Нэг цонхны үр дүн чимээнд живсэн байдаг (167 арилжаа × $52 хазайлт →
+    нийлбэрийн хазайлт нь дансны ~10%). Тогтвортой байдлыг зөвхөн давталтаар
+    хэмжинэ.
+    """
+
+    @pytest.fixture
+    def windows_spy(self, monkeypatch, synthetic_market):
+        offsets = []
+
+        def fake_load(symbols, days, **kw):
+            offsets.append(kw.get("offset_days"))
+            return synthetic_market
+
+        monkeypatch.setattr(backtest, "load_history", fake_load)
+        return offsets
+
+    def test_windows_do_not_overlap(self, windows_spy):
+        backtest.run_walk_forward(days=30, windows=4, start_balance=10_000.0,
+                                  configs=[{"name": "x"}], progress=False)
+
+        assert windows_spy == [0, 30, 60, 90]
+
+    def test_an_offset_shifts_every_window(self, windows_spy):
+        backtest.run_walk_forward(days=30, windows=3, start_balance=10_000.0,
+                                  offset_days=91, configs=[{"name": "x"}], progress=False)
+
+        assert windows_spy == [91, 121, 151]
+
+    def test_a_window_without_data_is_skipped_not_fatal(self, monkeypatch, synthetic_market):
+        calls = {"n": 0}
+
+        def flaky(symbols, days, **kw):
+            calls["n"] += 1
+            return {} if calls["n"] == 2 else synthetic_market
+
+        monkeypatch.setattr(backtest, "load_history", flaky)
+
+        collected = backtest.run_walk_forward(days=30, windows=3, start_balance=10_000.0,
+                                              configs=[{"name": "x"}], progress=False)
+
+        assert len(collected) == 2
+
+    def test_each_window_records_every_configuration(self, windows_spy):
+        collected = backtest.run_walk_forward(
+            days=30, windows=2, start_balance=10_000.0, progress=False,
+            configs=[{"name": "a"}, {"name": "b", "min_score": 60.0}])
+
+        assert len(collected) == 2
+        for window in collected:
+            assert [cfg["name"] for cfg in window["configs"]] == ["a", "b"]
+
+    def test_only_summaries_are_kept_not_the_price_data(self, windows_spy):
+        # Цонх бүрийн өгөгдөл ~200 MB — хуримтлуулбал санах ой дүүрнэ
+        collected = backtest.run_walk_forward(days=30, windows=2, start_balance=10_000.0,
+                                              configs=[{"name": "x"}], progress=False)
+
+        assert "data" not in collected[0]
+        # trades нь ТООЛОЛТ, арилжааны жагсаалт биш — талбарын жагсаалт үүнийг барина
+        assert set(collected[0]["configs"][0]) == {
+            "name", "return_pct", "trades", "win_rate", "breached", "max_dd"}
+
+
+class TestWalkForwardReport:
+    def _window(self, returns, breaches=None, from_ms=0, benchmark=5.0):
+        breaches = breaches or {}
+        return {
+            "offset": 0, "from_ms": from_ms, "to_ms": from_ms + 30 * 24 * 3_600_000,
+            "symbols": 15, "benchmark": benchmark,
+            "configs": [{"name": name, "return_pct": value, "trades": 20,
+                         "win_rate": 60.0, "breached": breaches.get(name, False),
+                         "max_dd": 5.0}
+                        for name, value in returns.items()],
+        }
+
+    def test_a_configuration_positive_everywhere_is_flagged(self):
+        collected = [self._window({"тогтвортой": 5.0, "хэлбэлзэх": 9.0}),
+                     self._window({"тогтвортой": 2.0, "хэлбэлзэх": -4.0})]
+
+        report = backtest.format_walk_forward_report(collected, 30, 10_000.0)
+
+        assert "✅ БҮХ цонхонд эерэг" in report
+        assert "тогтвортой" in report.split("✅")[1]
+        assert "хэлбэлзэх" not in report.split("✅")[1]
+
+    def test_a_breaching_window_disqualifies_a_configuration(self):
+        collected = [self._window({"a": 5.0}, breaches={"a": True}),
+                     self._window({"a": 3.0})]
+
+        report = backtest.format_walk_forward_report(collected, 30, 10_000.0)
+
+        assert "Бүх цонхонд эерэг байсан хувилбар АЛГА" in report
+
+    def test_when_nothing_survives_it_says_so(self):
+        collected = [self._window({"a": 5.0, "b": -1.0}),
+                     self._window({"a": -2.0, "b": 3.0})]
+
+        report = backtest.format_walk_forward_report(collected, 30, 10_000.0)
+
+        assert "АЛГА" in report
+        assert "✅" not in report
+
+    def test_the_per_window_grid_marks_breaches(self):
+        collected = [self._window({"a": 5.0}, breaches={"a": True}),
+                     self._window({"a": 3.0})]
+
+        report = backtest.format_walk_forward_report(collected, 30, 10_000.0)
+        grid = report.split("ЦОНХ ТУС БҮРИЙН ӨГӨӨЖ")[1]
+        row = next(line for line in grid.split("\n") if line.strip().startswith("a "))
+
+        assert "❌" in row
+        assert row.count("❌") == 1        # зөвхөн эхний цонхонд
+
+    def test_the_noise_warning_scales_with_the_window_count(self):
+        two = backtest.format_walk_forward_report(
+            [self._window({"a": 1.0}), self._window({"a": 1.0})], 30, 10_000.0)
+        four = backtest.format_walk_forward_report(
+            [self._window({"a": 1.0}) for _ in range(4)], 30, 10_000.0)
+
+        assert "25.0%" in two      # 1/2^2
+        assert "6.2%" in four      # 1/2^4
+
+    def test_no_windows_is_reported_rather_than_crashing(self):
+        report = backtest.format_walk_forward_report([], 30, 10_000.0)
+
+        assert "Ямар ч цонх ажиллаагүй" in report

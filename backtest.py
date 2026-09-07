@@ -857,6 +857,143 @@ def format_sweep_report(results, data=None):
 
 
 # ----------------------------------------------------------------
+# Walk-forward: олон цонх дээр давтах
+# ----------------------------------------------------------------
+
+def _window_summary(sim):
+    """Цонх бүрээс зөвхөн тоог хадгална — өгөгдлийг санах ойд үлдээхгүй."""
+    trades = sim["trades"]
+    nets = np.array([t["net"] for t in trades], dtype=float) if trades else np.zeros(0)
+    return {
+        "name": sim["name"],
+        "return_pct": (sim["final_balance"] - sim["start_balance"]) / sim["start_balance"] * 100,
+        "trades": len(trades),
+        "win_rate": float((nets > 0).mean() * 100) if len(nets) else 0.0,
+        "breached": bool(sim.get("breach_ms")),
+        "max_dd": _max_drawdown(sim["equity_curve"]),
+    }
+
+
+def run_walk_forward(days, windows, start_balance=None, symbols=None, exec_interval="15m",
+                     data_url=None, disabled=None, offset_days=0, configs=None, progress=True):
+    """Ижил хувилбаруудыг ДАВХЦААГҮЙ хэд хэдэн цонхон дээр ажиллуулна.
+
+    Нэг цонхны үр дүн нь чимээнд живсэн байдаг: 167 арилжаа, нэг арилжааны
+    хазайлт ~$52 бол нийлбэрийн хазайлт √167 × 52 ≈ $672, өөрөөр хэлбэл
+    $6,356 дансны 10%. Тиймээс нэг цонхон дээрх 10%-аас доош ялгаа нь юу ч
+    хэлдэггүй. Олон цонхон дээр давтаж дундаж, тархалт, тогтвортой байдлыг
+    харснаар л дүгнэлт гаргах боломжтой болно.
+
+    Цонхнууд давхцахгүй (алхам = цонхны урт) — давхцвал ижил өгөгдлийг дахин
+    тоолж, итгэлийг хиймлээр өсгөнө.
+    """
+    symbols = symbols or SYMBOLS_POOL
+    configs = configs or DEFAULT_SWEEP
+    if start_balance is None:
+        try:
+            start_balance = account.get_usdt_balance() or 10_000.0
+        except Exception:
+            start_balance = 10_000.0
+
+    collected = []
+    for w in range(windows):
+        offset = offset_days + w * days
+        if progress:
+            log.info(f"🪟 Цонх {w + 1}/{windows} (өнөөдрөөс {offset}-{offset + days} хоногийн өмнө)")
+        data = load_history(symbols, days, exec_interval=exec_interval, progress=progress,
+                            data_url=data_url, offset_days=offset)
+        if not data:
+            log.warning(f"⚠️ Цонх {w + 1}: өгөгдөл татагдсангүй — алгаслаа")
+            continue
+
+        results = run_sweep(data, start_balance, configs=configs, disabled=disabled,
+                            halt_on_drawdown=False, progress=progress)
+        first = results[0]
+        collected.append({
+            "offset": offset,
+            "from_ms": first["from_ms"],
+            "to_ms": first["to_ms"],
+            "symbols": len(first["symbols"]),
+            "benchmark": _buy_and_hold(data, first["from_ms"], first["to_ms"]),
+            "configs": [_window_summary(sim) for sim in results],
+        })
+        # Цонх бүрийн өгөгдөл ~200 MB — дараагийнх руу орохын өмнө суллана
+        del data, results
+    return collected
+
+
+def format_walk_forward_report(collected, days, start_balance):
+    lines = []
+    add = lines.append
+
+    def when(ms):
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    add("=" * 80)
+    add(f"WALK-FORWARD   {len(collected)} цонх × {days} хоног   |   ${start_balance:,.0f}")
+    add("=" * 80)
+    if not collected:
+        add("Ямар ч цонх ажиллаагүй — өгөгдөл татагдсангүй.")
+        return "\n".join(lines)
+
+    add("")
+    add("─ ЦОНХНУУД ─────────────────────────────────────────────────────────────────")
+    for n, window in enumerate(collected, 1):
+        bench = f"{window['benchmark']:+.2f}%" if window["benchmark"] is not None else "—"
+        add(f"  {n}. {when(window['from_ms'])} → {when(window['to_ms'])}"
+            f"   {window['symbols']} coin   BTC {bench}")
+
+    names = [cfg["name"] for cfg in collected[0]["configs"]]
+    add("")
+    add("─ ХУВИЛБАР ТУС БҮР ─────────────────────────────────────────────────────────")
+    add(f"  {'хувилбар':<32}{'эерэг':>7}{'зогссон':>9}{'дундаж':>9}{'хамг.муу':>10}{'хамг.сайн':>11}")
+    add("  " + "-" * 78)
+
+    rows = []
+    for name in names:
+        per_window = [cfg for window in collected
+                      for cfg in window["configs"] if cfg["name"] == name]
+        returns = np.array([cfg["return_pct"] for cfg in per_window], dtype=float)
+        breaches = sum(1 for cfg in per_window if cfg["breached"])
+        positive = int((returns > 0).sum())
+        rows.append((name, positive, len(per_window), breaches, returns))
+        add(f"  {name:<32}{positive}/{len(per_window):<5}{breaches}/{len(per_window):<7}"
+            f"{returns.mean():>8.2f}%{returns.min():>9.2f}%{returns.max():>10.2f}%")
+
+    add("")
+    add("─ ЦОНХ ТУС БҮРИЙН ӨГӨӨЖ ────────────────────────────────────────────────────")
+    header = "  " + "хувилбар".ljust(32) + "".join(f"{n:>10}" for n in range(1, len(collected) + 1))
+    add(header)
+    for name in names:
+        cells = ""
+        for window in collected:
+            cfg = next(c for c in window["configs"] if c["name"] == name)
+            mark = "❌" if cfg["breached"] else ""
+            cells += f"{cfg['return_pct']:>8.1f}%{mark:<1}"
+        add(f"  {name:<32}{cells}")
+    add("")
+    add("  ❌ = тэр цонхонд жинхэнэ бот 15% хязгаарт хүрч зогсох байсан")
+
+    # Сонголт: бүх цонхонд эерэг БА хэзээ ч хязгаарт хүрээгүй хувилбарууд
+    survivors = [(name, returns.mean()) for name, positive, total, breaches, returns in rows
+                 if positive == total and breaches == 0]
+    add("")
+    if survivors:
+        survivors.sort(key=lambda item: -item[1])
+        add("✅ БҮХ цонхонд эерэг, хэзээ ч хязгаарт хүрээгүй:")
+        for name, mean in survivors:
+            add(f"     {name}  (дундаж {mean:+.2f}%)")
+    else:
+        add("⚠️ Бүх цонхонд эерэг байсан хувилбар АЛГА — аль нь ч тогтвортой биш.")
+
+    add("")
+    add(f"Чимээний хэмжээ: нэг цонхны үр дүн ±5–10% хэлбэлзэж болно. {len(collected)} цонхонд")
+    add("дараалан эерэг байх нь санамсаргүйгээр тохиох магадлал "
+        f"{100 / (2 ** len(collected)):.1f}% — ЭНЭ нь нотолгоо, ганц цонхны тоо биш.")
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------
 # Тайлан
 # ----------------------------------------------------------------
 
@@ -1107,6 +1244,8 @@ def main(argv=None):
     parser.add_argument("--offset-days", type=int, default=0,
                         help="цонхны төгсгөлийг өнөөдрөөс хэдэн хоногоор ухраах "
                              "(ж: --days 91 --offset-days 91 = өмнөх улирал)")
+    parser.add_argument("--windows", type=int, default=1,
+                        help="давхцаагүй хэдэн цонхон дээр давтах (--sweep-тэй хамт)")
     parser.add_argument("--sweep", action="store_true",
                         help="хэд хэдэн тохиргоог нэг ажиллагаагаар харьцуулна")
     parser.add_argument("--no-halt", action="store_true",
@@ -1120,6 +1259,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.offset_days < 0:
         parser.error("--offset-days сөрөг байж болохгүй")
+    if args.windows < 1:
+        parser.error("--windows дор хаяж 1 байх ёстой")
+    if args.windows > 1 and not args.sweep:
+        parser.error("--windows нь --sweep-тэй хамт ажиллана")
 
     setup_logging(STATE_DIR, STATE_DIR_IS_PERSISTENT)
     binance_client.sync_server_time()
@@ -1132,6 +1275,18 @@ def main(argv=None):
         if unknown:
             parser.error(f"Ийм стратеги алга: {', '.join(unknown)}. "
                          f"Боломжтой: {', '.join(STRATEGY_NAMES)}")
+
+    if args.windows > 1:
+        collected = run_walk_forward(
+            days=args.days, windows=args.windows, start_balance=args.balance,
+            symbols=symbols, exec_interval=args.exec_interval, data_url=args.data_url,
+            disabled=disabled, offset_days=args.offset_days,
+        )
+        report = format_walk_forward_report(collected, args.days, args.balance or 10_000.0)
+        print(report)
+        if collected and args.telegram:
+            send_report_to_telegram(report)
+        return 0 if collected else 1
 
     if args.sweep:
         # Sweep нь breaker-ыг ҮРГЭЛЖ унтраана: хувилбарууд өөр өөр өдөр зогсвол
