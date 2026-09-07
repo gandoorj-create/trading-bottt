@@ -1,554 +1,386 @@
-# Trading Bot
+Trading Bot {#trading-bot}
 
-Binance USDⓈ-M Futures дээр ажилладаг автомат арилжааны бот. 6 стратегиар зэрэг
-дүн шинжилгээ хийж, оноогоор эрэмбэлж, эрсдэлийн шүүлтүүр давсан хэдэн coin дээр
-позиц нээдэг. Бүх мэдэгдэл Telegram руу явна.
+An automated trading bot for Binance USDⓈ\-M Futures. It analyzes coins across 6 strategies simultaneously, ranks them by score, and opens positions on the coins that pass the risk filters. All notifications are sent to Telegram.
 
-## Хэрхэн ажилладаг вэ
+## How It Works {#how-it-works}
 
-Бот `main()` дотор тасралтгүй давталтаар ажиллана. Хоёр өөр давтамжтай:
+The bot runs in a continuous loop inside `main()`, on two different cadences:
 
-| Юу | Хэр олон удаа | Тохиргоо |
-|---|---|---|
-| Позиц хянах, зорилт шалгах | 30 секунд тутам | `monitor_interval_sec` |
-| Шинэ coin хайх (screening) | 2 цаг тутам | `selection_interval_minutes` |
+| What | How Often | Setting |
+| --- | --- | --- |
+| Monitor positions, check targets | Every 30 seconds | `monitor_interval_sec` |
+| Search for new coins (screening) | Every 2 hours | `selection_interval_minutes` |
 
-**Тохирох сигнал гарвал restart шаардлагагүй** — screening цикл өөрөө дуудагдаж
-арилжаа эхэлнэ. Зөвхөн drawdown circuit breaker ажилласан үед л гараар restart
-хийх шаардлагатай (доороос үзнэ үү).
+When a valid signal appears, no restart is needed — the screening cycle triggers itself and trading begins. A manual restart is only required after the drawdown circuit breaker has tripped (see below).
 
-### Сонголтын юүлүүр
+**Selection filter**
 
 ```
-15 coin (symbols_pool)
-   ↓  analyze_coin — индикатор бодож, стратеги бүрд signal + оноо гаргана
-   ↓  MTF шүүлтүүр — 4h/1h trend-ийн эсрэг арилжаа хийхгүй
-   ↓  min_signal_score — оноо хүрэхгүй signal HOLD болно
-   ↓  стратеги бүрээс дээд max_candidates_per_strategy coin
-   ↓  ижил symbol давхардвал өндөр оноотой нь үлдэнэ
-   ↓  оноогоор эрэмбэлнэ
-   ↓  корреляцийн шүүлтүүр — сонгогдсонтой correlation_threshold-оос дээш бол хасна
-   ↓  max_selections хүртэл
-execute_trades — маржин, minQty, minNotional шалгаад захиалга өгнө
+15 coins (symbols_pool)
+   ↓  analyze_coin — computes indicators and produces a signal + score for each strategy
+   ↓  MTF filter — no trades against the 4h/1h trend
+   ↓  min_signal_score — a signal below the threshold becomes HOLD
+   ↓  up to max_candidates_per_strategy coins from each strategy
+   ↓  if the same symbol appears twice, the higher-scoring one is kept
+   ↓  ranked by score
+   ↓  correlation filter — drops anything above correlation_threshold relative to what's already selected
+   ↓  capped at max_selections
+execute_trades — checks margin, minQty, minNotional, then places the order
 ```
 
-### Стратегиуд
+## Strategies {#strategies}
 
-`SUPERTREND`, `MACD_MOMENTUM`, `BREAKOUT`, `BOLLINGER_MEAN_REVERSION`,
-`RSI_STRATEGY`, `TREND_FOLLOWING` — тус бүр өөрийн signal нөхцөл, оноо бодох
-томьёотой. Оноонууд стратеги хооронд ижил масштабгүй тул `min_signal_score`-г
-өөрчлөхдөө болгоомжтой байх (доод хэсгээс үзнэ үү).
+`SUPERTREND`, `MACD_MOMENTUM`, `BREAKOUT`, `BOLLINGER_MEAN_REVERSION`, `RSI_STRATEGY`, `TREND_FOLLOWING` — each has its own signal conditions and scoring formula. Scores aren't on the same scale across strategies, so change `min_signal_score` carefully (see below).
 
-`BOLLINGER_MEAN_REVERSION` болон `RSI_STRATEGY` нь band/RSI extreme дээр
-**буцаад ирнэ** гэж бооцоолдог (fade), харин `BREAKOUT` эсрэгээрээ band-аас
-**volume spike-тайгаар** цуцарвал үргэлжлэх гэж бооцоолдог (`breakout_volume_ratio`
-дээш эзлэхүүн шаардана). Хуучин `GRID_TRADING` нь бодит grid логикгүй, зөвхөн
-`BOLLINGER_MEAN_REVERSION`-ий VWAP шалгалтгүй сул хувилбар байсан тул устгаж,
-энэ шинэ, чиглэлээрээ эсрэг стратегиор солив.
+`BOLLINGER_MEAN_REVERSION` and `RSI_STRATEGY` bet that price reverts after hitting a band/RSI extreme (fade), while `BREAKOUT` bets the opposite — that a band break with a volume spike continues (it requires volume above `breakout_volume_ratio`). The old `GRID_TRADING` strategy had no real grid logic and was effectively a weaker version of `BOLLINGER_MEAN_REVERSION` without the VWAP check, so it was removed and replaced with this new, directionally\-opposite strategy.
 
-`MACD_MOMENTUM`-ийн онооны томьёонд `volume_ratio` ордог байсан ч signal
-гаргах нөхцөлд шалгагддаггүй байсан тул эзлэхүүнгүй (noise) MACD хөдөлгөөн
-ч BUY/SELL болж, зөвхөн онооны жагсаалтад доогуур байрладаг байв. Одоо
-`macd_min_volume_ratio`-оос доогуур эзлэхүүнтэй мөч дээр HOLD буцаана.
+`MACD_MOMENTUM`'s scoring formula included `volume_ratio`, but it wasn't actually checked in the signal condition — so low\-volume (noise) MACD moves still became BUY/SELL, just ranked lower on score. It now returns HOLD whenever volume is below `macd_min_volume_ratio`.
 
-### Хугацааны давхрага: SUPERTREND (1h) vs TREND_FOLLOWING (4h)
+## Timeframe Layering: SUPERTREND (1h) vs TREND\_FOLLOWING (4h) {#timeframe-layering-supertrend-1h-vs-trend_following-4h}
 
-Хоёулаа 1h дээр ажилладаг байсан тул ижил горимд зэрэг өндөр оноо авч,
-портфель цэвэр тренд-хазайлттай болох эрсдэлтэй байв. Одоо тусгаарлагдсан:
+Both used to run on 1h, so they'd score highly together in the same regime, risking a portfolio that's purely trend\-biased. They're now separated:
 
-| | Давтамж | Юу барих вэ |
-|---|---|---|
-| `SUPERTREND` | 1h | Трендийн **эргэлтийн мөч** (supertrend flip) — тактик entry |
-| `TREND_FOLLOWING` | 4h | **Макро тренд** — EMA20/50/100 нь 3–17 хоногийн давхрага |
+| Strategy | Timeframe | What it captures |
+| --- | --- | --- |
+| `SUPERTREND` | 1h | Trend\-reversal moments (supertrend flip) — tactical entry |
+| `TREND_FOLLOWING` | 4h | Macro trend — EMA20/50/100 spans 3–17 days |
 
-4h датаг биржээс тусад нь татахгүй, ижил 1h df-ээс `resample_ohlcv`-аар
-нэгтгэдэг. Учир нь backtest түүхэн цонхоор алхдаг тул тэнд одоогийн 4h датаг
-татвал **lookahead алдаа** болно — амьд арилжаа ба backtest хоёр өөр логикоор
-ажиллана. Ингэснээр нэмэлт API дуудлага ч гарахгүй.
+4h data isn't fetched separately from the exchange — it's resampled from the same 1h dataframe via `resample_ohlcv`. This matters because backtesting steps through historical windows, and fetching live 4h data there would cause lookahead bias — live trading and backtesting would run on different logic. It also means no extra API calls.
 
-Босгыг синтетик дата дээр хэмжиж сонгосон (`trend_htf_min_adx: 30`,
-`trend_htf_min_slope: 1.0`): трендтэй 40/40 өгөгдөл дээр барьж, chop дээр
-40-өөс 1 л худал дохио өгнө. 1h дээр chop-ийн ADX 25 орчим байж босгонд
-аюултай ойрхон ирдэг бол 4h дээр 17 хүртэл унадаг. `slope` босго 1h-ийн
-0.5%-аас өндөр байгаа шалтгаан: 5 барын налуу 4h дээр 20 цагийг хамардаг тул
-байгалиасаа ~3 дахин том утга гардаг.
+The thresholds (`trend_htf_min_adx: 30`, `trend_htf_min_slope: 1.0`) were chosen by measuring on synthetic data: they catch 40/40 trending samples and give only 1 false signal out of 40 in choppy conditions. On 1h, chop's ADX sits around 25 — dangerously close to the threshold — but it drops as low as 17 on 4h. The slope threshold is higher than 1h's 0.5% because a 5\-bar slope on 4h spans 20 hours, so it's naturally about 3x larger.
 
-`analyze_coin` 260-ийн оронд **600 1h лаа** татдаг болов (600 / 4 = 150 4h лаа
-— 4h EMA-100-д хүрэлцэнэ). Нэг хүсэлт хэвээр, зөвхөн payload томорно.
+`analyze_coin` now fetches 600 1h candles instead of 260 (600 / 4 \= 150 4h candles — enough for a 4h EMA\-100). Still a single request, just a larger payload.
 
-## Эрсдэлийн хамгаалалт
+## Risk Protections {#risk-protections}
 
-| Хамгаалалт | Юу хийдэг | Тохиргоо |
-|---|---|---|
-| Emergency stop-loss | Позиц бүр дээр заавал тавигдана | `emergency_sl_pct` |
-| Take profit | Позиц бүр дээр заавал тавигдана | `take_profit_pct` |
-| **Хэсэгчилсэн TP → breakeven** | Позицын хагасыг эрт тасалж, үлдсэний stop-ыг breakeven руу зөөнө | `partial_tp_*`, `breakeven_offset_pct` |
-| Trailing stop | Ашигтай явбал идэвхжинэ (best effort) | `trailing_activation_pct`, `trailing_callback_rate` |
-| **Мэдээний өмнөх зогсоолт** | Товлогдсон CPI/FOMC-ийн өмнө шинэ арилжаа нээхгүй | `news_trading.enabled` |
-| **ATR-аар тэнцүүлсэн хэмжээ** | Хэлбэлзэлтэй coin бага хэмжээ, өргөн stop авна | `atr_risk_sizing_enabled`, `risk_per_trade_pct` |
-| **Хугацааны stop** | Чиглэлээ өгөөгүй позицыг хааж слот чөлөөлнө | `max_hold_hours`, `time_stop_flat_pct` |
-| Маржины дээд хязгаар | Нийт маржин балансын X%-аас хэтрэхгүй | `max_total_margin_usage` |
-| Корреляци | Хоорондоо хэт хамааралтай позиц нээхгүй | `correlation_threshold` |
-| Дараалсан алдагдал | Стратеги N удаа алдвал түр зогсоно | `consecutive_loss_limit`, `strategy_cooldown_cycles` |
-| **Drawdown circuit breaker** | Сессийн оргилоос X% буурвал **бүрмөсөн зогсоно** | `max_session_drawdown_pct` |
+| Protection | What it does | Setting |
+| --- | --- | --- |
+| Emergency stop\-loss | Always placed on every position | `emergency_sl_pct` |
+| Take profit | Always placed on every position | `take_profit_pct` |
+| Partial TP → breakeven | Closes half the position early, then moves the remaining stop to breakeven | `partial_tp_*`, `breakeven_offset_pct` |
+| Trailing stop | Activates once in profit (best effort) | `trailing_activation_pct`, `trailing_callback_rate` |
+| Pre\-news halt | No new trades opened before a scheduled CPI/FOMC event | `news_trading.enabled` |
+| ATR\-scaled sizing | Volatile coins get smaller size and wider stops | `atr_risk_sizing_enabled`, `risk_per_trade_pct` |
+| Time stop | Closes a position that hasn't moved, freeing the slot | `max_hold_hours`, `time_stop_flat_pct` |
+| Max margin usage | Total margin can't exceed X% of balance | `max_total_margin_usage` |
+| Correlation | Won't open positions too correlated with each other | `correlation_threshold` |
+| Consecutive losses | Pauses a strategy after N losses in a row | `consecutive_loss_limit`, `strategy_cooldown_cycles` |
+| Drawdown circuit breaker | Halts entirely if the session drops X% from its peak | `max_session_drawdown_pct` |
 
-**Circuit breaker ажиллавал**: бүх позиц хаагдаж, бот шинэ арилжаа хийхгүй.
-Энэ бол зориудын hard stop — **гараар restart хийтэл автоматаар үргэлжлэхгүй**.
-Бусад `safety_lock` тохиолдлууд (зорилтод хүрсэн гэх мэт) өөрөө сэргэдэг.
+When the circuit breaker trips: all positions are closed and the bot stops opening new trades. This is a deliberate hard stop — it does not resume automatically until manually restarted. Other `safety_lock` conditions (like hitting the profit target) recover on their own.
 
-### Хэсэгчилсэн take-profit (scale-out)
+## Partial Take\-Profit (Scale\-Out) {#partial-take-profit-scale-out}
 
-Өмнө нь гарц ганц байсан: `take_profit_pct` (4.5%) эсвэл `emergency_sl_pct`
-(3%). "+2% хүрээд буцаж SL цохисон" арилжаа бүтэн алдагдал болдог байв.
+There used to be only one exit: `take_profit_pct` (4.5%) or `emergency_sl_pct` (3%). A trade that reached \+2% and then reversed into the SL became a full loss.
 
-Одоо позиц нээгдэхэд `partial_tp_pct` (2%) дээр `partial_tp_ratio` (50%)
-хэмжээтэй **тусдаа reduceOnly TAKE_PROFIT_MARKET** захиалга нэмж тавина. Тэр
-биелэхэд позицын хэмжээ буурснаар илэрч (algo захиалгын биелэлтийг найдвартай
-жагсаах endpoint байхгүй тул позицын хэмжээ л үнэний эх сурвалж), үлдсэн
-хэсгийн stop нь `breakeven_offset_pct` (0.1% — орох/гарах шимтгэлийг нөхнө)
-дээр дахин баригдана.
+Now, when a position opens, a separate `reduceOnly` `TAKE_PROFIT_MARKET` order is placed at `partial_tp_pct` (2%) for `partial_tp_ratio` (50%) of the size. Its fill is detected by the drop in position size (there's no reliable endpoint to list algo\-order fills, so position size is the source of truth), and the stop on the remaining portion is then re\-placed at `breakeven_offset_pct` (0.1% — covers entry/exit fees).
 
-Гурван үр дүн: SL цохих `-3%`; 2% хүрээд буцах `+1.05%` (өмнө нь `-3%`);
-бүтэн TP хүрэх `+3.25%` (өмнө нь `+4.5%`). Өөрөөр хэлбэл **том ялалтын хэсгийг
-өгөөд, алдагдлын нэг бүхэл ангиллыг бага зэргийн ашиг болгож байна** — энэ бол
-ухамсартай солилцоо, үнэ төлбөргүй сайжруулалт биш.
+Three outcomes: hit SL → \-3%; reach 2% and reverse → \+1.05% (was \-3%); reach full TP → \+3.25% (was \+4.5%). In other words, it gives up some size of the big wins in exchange for turning an entire category of losses into small gains — a deliberate trade\-off, not a free improvement.
 
-Хэсэгчилсэн TP нь best-effort: хагас позиц нь `minQty`/`minNotional`-д хүрэхгүй
-бол, эсвэл захиалга татгалзагдвал зүгээр л алгасна — хатуу SL ба бүтэн TP
-хэвээр амьд тул арилжаа хамгаалалтгүй үлдэхгүй.
+Partial TP is best\-effort: if half the position doesn't meet minQty/minNotional, or the order is rejected, it's simply skipped — the hard SL and full TP stay live regardless, so the trade is never left unprotected.
 
-### ATR-аар эрсдэлээ тэнцүүлсэн хэмжээ
+## ATR\-Scaled Position Sizing {#atr-scaled-position-sizing}
 
-Өмнө нь coin болгон балансын ижил `trade_allocation` (9%)-ийг авдаг байсан.
-Гэтэл 0.5% ATR-тай BTC ба 2.5% ATR-тай DOGE хоёр ижил хэмжээтэй байхад тогтмол
-3% stop нь эхнийх дээр ~6 ATR зайд (бараг хэзээ ч цохихгүй), хоёр дахь дээр
-~1 ATR зайд (байнга цохино) байрладаг — ижил тоо огт ижил утга илэрхийлдэггүй
-байв.
+Previously every coin took the same `trade_allocation` (9%) of the balance. But with BTC at 0.5% ATR and DOGE at 2.5% ATR both sized the same, a fixed 3% stop sits \~6 ATR away for the first (almost never hit) and \~1 ATR away for the second (hit constantly) — the same number meant completely different things.
 
-Одоо stop нь `atr_sl_multiplier × ATR%` (хашлага `atr_sl_min_pct`
-`atr_sl_max_pct`), хэмжээ нь түүнээс урвуугаар: *stop цохиход балансын
-`risk_per_trade_pct` -ийг алдана*. Гарцуудын харьцаа config-оос хэвээр гарна —
-ATR нь зөвхөн бүх бүтцийг нэг дор сунгаж/агшаана, тиймээс шинэ товчлуур
-нэмэгдэхгүй, `atr_risk_sizing_enabled: false` үед яг өмнөх зан төлөв гарна.
+The stop is now `atr_sl_multiplier × ATR%` (clamped to `atr_sl_min_pct`/`atr_sl_max_pct`), and size scales inversely with it: hitting the stop always costs `risk_per_trade_pct` of the balance. Exit ratios still come from config — ATR only stretches or shrinks the whole structure together, so it doesn't add a new dial, and with `atr_risk_sizing_enabled: false` behavior is exactly as before.
 
-| ATR% | Stop | TP | Маржин | Эрсдэл |
-|---|---|---|---|---|
-| 0.5 | 2.00% | 3.00% | 9.0% | $57 |
-| 1.5 | 3.00% | 4.50% | 8.3% | $79 |
-| 2.0 | 4.00% | 6.00% | 6.2% | $79 |
-| 3.0 | 5.00% | 7.50% | 5.0% | $79 |
+| ATR% | Stop | TP | Margin | Risk |
+| --- | --- | --- | --- | --- |
+| 0\.5 | 2\.00% | 3\.00% | 9\.0% | $57 |
+| 1\.5 | 3\.00% | 4\.50% | 8\.3% | $79 |
+| 2\.0 | 4\.00% | 6\.00% | 6\.2% | $79 |
+| 3\.0 | 5\.00% | 7\.50% | 5\.0% | $79 |
 
-(баланс $6,356, `risk_per_trade_pct: 1.25`). `max_trade_allocation: 0.09` нь
-6 × 9% = 54% ≤ `max_total_margin_usage` -ийг хангана, өөрөөр хэлбэл **6 зэрэг
-позиц барих боломж хэвээр**. Тайван coin дээр хашлага идэвхжиж эрсдэл нь $79
-биш $57 болно — тал руугаа хазайсан, зориудаар.
+(Balance $6,356, `risk_per_trade_pct: 1.25`.) `max_trade_allocation: 0.09` keeps 6 × 9% \= 54% ≤ `max_total_margin_usage`, so holding 6 positions at once is still possible. On a calm coin the clamp kicks in and risk becomes $57 instead of $79 — asymmetric on purpose.
 
-### Хугацааны stop
+## Time Stop {#time-stop}
 
-`max_hold_hours` (24ц) өнгөрсөн ч `time_stop_flat_pct` (±1%) дотор хэвтсэн
-хэвээр байвал позицыг хааж, слот/маржин/funding-ыг чөлөөлнө. Ашигтай яваа
-позицыг хөндөхгүй — түүнийг trailing stop, TP хариуцна. Хаах захиалга явуулсны
-дараа 5 минут дахин илгээхгүй (позиц алга болтол хэдэн мөчлөг өнгөрч болно).
+If `max_hold_hours` (24h) has elapsed and the position is still sitting within `time_stop_flat_pct` (±1%), it's closed to free up the slot/margin/funding. A position that's in profit is left alone — that's handled by the trailing stop and TP. After sending the close order, it won't be resent for 5 minutes (a few cycles may pass before the position actually disappears).
 
-### Арилжааны бүртгэл
+## Trade Journal {#trade-journal}
 
-`journal_enabled` үед хаагдсан арилжаа бүр `STATE_DIR/trades.csv` руу нэг мөр
-болж бичигдэнэ: орох үеийн score, ADX, RSI, ATR%, volume ratio, regime, MTF,
-хэрэглэсэн SL/TP хувь, барьсан хугацаа, гарсан шалтгаан (`SL_TP_TRAILING`,
-`TIME_STOP`, `TARGET`), хэсэгчилсэн TP биелсэн эсэх, PnL.
+When `journal_enabled`, every closed trade is written as one row to `STATE_DIR/trades.csv`\: entry score, ADX, RSI, ATR%, volume ratio, regime, MTF, the SL/TP percentages used, hold duration, exit reason (`SL_TP_TRAILING`, `TIME_STOP`, `TARGET`), whether the partial TP filled, and PnL.
 
-Зорилго: `min_signal_score`, TP/SL, ATR үржүүлэгчийг **таамгаар биш тоогоор**
-тааруулах. 30-50 арилжааны дараа жишээ нь:
+The goal: tune `min_signal_score`, TP/SL, and the ATR multiplier with numbers, not guesses. After 30–50 trades, for example:
 
-```
-python -c "import pandas as pd; d=pd.read_csv('trades.csv'); \
+```bash
+python3 -c "import pandas as pd; d=pd.read_csv('trades.csv'); \
 print(d.groupby(pd.cut(d.score,[0,16,20,25,100])).pnl.agg(['count','sum','mean']))"
 ```
 
-Бүртгэл нь арилжааны гогцоог хэзээ ч зогсоохгүй — бичилтийн бүх алдааг
-залгиад log-д warning үлдээнэ.
+Journaling never blocks the trading loop — any write error is swallowed and left as a warning in the log.
 
-**⚠️ `STATE_DIR` нь Railway volume дээр байх ёстой**, эс тэгвээс redeploy
-болгонд бүртгэл алга болно.
+> ⚠️ `STATE_DIR` must be on a Railway volume, otherwise the journal is wiped on every redeploy.
 
-### Мэдээний цонх
+## News Window {#news-window}
 
-`news_trading.enabled: true` үед бот товлогдсон USD эвент (`event_keywords`,
-анхдагчаар CPI ба FOMC) -ийн өмнө `pause_before_minutes` минутын өмнөөс шинэ
-техник арилжаа нээхээ зогсоож, `wait_after_minutes` хүлээгээд үргэлжилнэ.
-Нээлттэй позицуудын мониторинг тасрахгүй.
+When `news_trading.enabled: true`, the bot stops opening new technical trades starting `pause_before_minutes` before a scheduled USD event (`event_keywords`, CPI and FOMC by default), then resumes after waiting `wait_after_minutes`. Monitoring of open positions is never interrupted.
 
-Календарийг цагт нэг удаа л уншина. Уншиж чадахгүй бол (HTTP алдаа, JSON биш
-хариу) дахин оролдох завсар алдаа бүрт уртсаж (15 → 30 → 45 → 60 мин) log-ыг
-дүүргэхгүй, 3 дахь алдаан дээр **нэг удаа** Telegram мэдэгдэл явуулна —
-чимээгүй унтарсан хамгаалалт бол хамгийн аюултай төрөл. Календар уншигдахгүй
-байх нь арилжааг хэзээ ч зогсоохгүй, зөвхөн зогсоолт хийгдэхгүй.
+The calendar is fetched once per hour. If the fetch fails (HTTP error, non\-JSON response), the retry interval backs off with each failure (15 → 30 → 45 → 60 min) instead of flooding the log, and a single Telegram alert fires on the 3rd failure — a protection that fails silently is the most dangerous kind. A failed calendar fetch never halts trading, it just means the pre\-news halt won't trigger.
 
-`post_news_trade` нь **тусдаа флаг бөгөөд анхдагчаар унтраалттай**. Тэр нь
-эвентийн дараах хөдөлгөөний чиглэл рүү үсэрдэг логик — backtest хийх боломжгүй
-тул батлагдаагүй. Зогсоолт нь дангаараа утгатай (spike дээр stop цохиулахаас
-хамгаална), тиймээс хоёрыг салгасан.
+`post_news_trade` is a separate flag, off by default. It's logic that jumps into the direction of the post\-event move — it's unproven because it can't be backtested. The halt alone is meaningful on its own (it protects against getting stopped out on the spike), so the two were kept separate.
 
-Хамгаалалтын нэг зарчим: **тодорхойгүй байдлыг аюулгүй гэж үзэхгүй**. Жишээ нь
-позицын жагсаалт уншигдаагүй бол "позиц байхгүй" гэж үзэлгүй тухайн мөчлөгийг
-алгасна — эс тэгвээс амьд позицын SL/TP цуцлагдах эрсдэлтэй.
+One safety principle throughout: uncertainty is never treated as safe. For example, if the position list fails to load, the bot doesn't assume "no positions" — it skips that cycle instead, since otherwise a live position's SL/TP could get cancelled.
 
-## Backtest
+## Backtest {#backtest}
 
 ```bash
-python backtest.py --days 90                 # сүүлийн 90 өдөр, жинхэнэ дансны балансаар
+python backtest.py --days 90                 # last 90 days, using the real account balance
 python backtest.py --days 180 --balance 6000 --csv trades_bt.csv
 python backtest.py --days 30 --exec-interval 5m --telegram
-python backtest.py --days 90 --disable MACD_MOMENTUM,BREAKOUT   # тодорхой стратегигүйгээр
-python backtest.py --days 90 --no-halt                          # drawdown breaker-гүйгээр бүтэн хугацаа
-python backtest.py --days 90 --sweep --disable MACD_MOMENTUM,BREAKOUT   # хувилбарууд харьцуулах
-python backtest.py --days 91 --offset-days 91 --sweep                   # өмнөх улирал (out-of-sample)
-python backtest.py --days 60 --windows 4 --sweep                        # 4 давхцаагүй цонх (walk-forward)
+python backtest.py --days 90 --disable MACD_MOMENTUM,BREAKOUT   # without specific strategies
+python backtest.py --days 90 --no-halt                          # full period, no drawdown breaker
+python backtest.py --days 90 --sweep --disable MACD_MOMENTUM,BREAKOUT   # compare variants
+python backtest.py --days 91 --offset-days 91 --sweep                   # prior quarter (out-of-sample)
+python backtest.py --days 60 --windows 4 --sweep                        # 4 non-overlapping windows (walk-forward)
 ```
 
-**Гол зарчим: дуурайхгүй, ботын кодыг өөрийг нь ажиллуулна.** Симуляц нь
-зөвхөн биржийн үүргийг гүйцэтгэнэ (захиалга биелүүлэх, шимтгэл, funding, цаг).
-Шийдвэрийг бүхэлд нь амьд кодоор гаргана:
+Core principle: it doesn't simulate the bot's logic, it runs the bot's actual code. The simulation only plays the exchange's role (filling orders, fees, funding, timing). Every decision comes from the live code:
 
-| Юу | Аль код |
-|---|---|
-| Signal, оноо, MTF/regime/score шүүлтүүр | `screening.analyze_frame` |
-| Нэр дэвшигч сонголт, корреляци, слот | `screening.pick_candidates` |
-| ATR гарцын түвшин ба позицын хэмжээ | `risk.exit_levels`, `risk.position_margin` |
-| Стратегийн cooldown, drawdown breaker | `risk.update_strategy_performance`, `risk.check_drawdown_circuit_breaker` |
+| What | Which code |
+| --- | --- |
+| Signal, score, MTF/regime/score filters | `screening.analyze_frame` |
+| Candidate selection, correlation, slots | `screening.pick_candidates` |
+| ATR exit levels and position sizing | `risk.exit_levels`, `risk.position_margin` |
+| Strategy cooldown, drawdown breaker | `risk.update_strategy_performance`, `risk.check_drawdown_circuit_breaker` |
 
-Тиймээс `config.json`-ы аль ч утгыг өөрчлөхөд backtest шууд түүнийг дагана,
-мөн стратегийн код засахад backtest хуучин хувилбарыг турших боломжгүй.
+So changing any value in `config.json` immediately flows through to the backtest, and there's no way to test an old strategy version once the code has been edited.
 
-### Юуг загварчилдаг вэ
+#### What It Models {#what-it-models}
 
-Бүтэн портфель: 6 слот, маржины хязгаар, ATR-аар тэнцүүлсэн хэмжээ, хатуу SL,
-бүтэн TP, **хэсэгчилсэн TP → breakeven**, trailing stop, хугацааны stop,
-`target_profit`-д хүрэхэд бүгдийг хаах, стратегийн cooldown, drawdown breaker.
-Зардлын талд: taker шимтгэл (леg бүр дээр), slippage, **бодит түүхэн funding**.
+The full portfolio: 6 slots, margin limits, ATR\-scaled sizing, hard SL, full TP, partial TP → breakeven, trailing stop, time stop, closing everything when `target_profit` is hit, strategy cooldown, drawdown breaker. On the cost side: taker fees (on every leg), slippage, and real historical funding.
 
-### Үнэнч байхын тулд тавьсан дүрмүүд
+#### Rules Set for Honesty {#rules-set-for-honesty}
 
-- **Lookahead байхгүй.** Signal нь зөвхөн хаагдсан лаанаас гарна, орох нь
-  ДАРААГИЙН барын нээлтээр. Тест нь шинжилгээнд өгсөн лааны сүүлийн цагийг
-  шууд шалгадаг.
-- **Лаан доторх дараалал консерватив.** Нэг лаанд SL ба TP хоёул хүрсэн бол
-  SL эхэлж биелсэн гэж үзнэ. Хэд хэдэн stop зэрэг цохисон бол хөдөлгөөний
-  чиглэлд хамгийн ойрхон нь эхэлнэ (таамаг биш, физик).
-- **Цоорхойг тооцно.** Лаа stop-оос доогуур нээгдвэл stop дээр биш, НЭЭЛТЭД
-  биелнэ.
-- **Breakeven нь дараагийн лаанаас.** Амьд бот partial биелэлтийг
-  мониторингийн дараагийн мөчлөгт л хардаг — тэр саатлыг хуулбарлана.
-- **Trailing нэг лаан дотор arm болоод тэр дороо биелэхгүй.**
-- Гарцыг анхдагчаар **15м лаагаар** шийднэ (`--exec-interval`) — 1h лаагаар
-  шийдэх нь тодорхойгүй байдлыг 4 дахин нэмэгдүүлнэ.
+- **No lookahead.** Signals only come from closed candles, and entries happen at the open of the NEXT bar. A test directly checks the timestamp of the last candle handed to the analysis.
+- **Intra\-candle ordering is conservative.** If a single candle touches both SL and TP, the SL is assumed to have filled first. If multiple stops are hit at once, the one closest to the direction of the move is assumed first (physics, not a guess).
+- **Gaps are accounted for.** If a candle opens below the stop, it fills at the OPEN, not at the stop price.
+- **Breakeven takes effect from the next candle.** The live bot only sees a partial fill on its next monitoring cycle — that lag is replicated.
+- **A trailing stop that arms within a candle doesn't also fill within that same candle.**
+- **Exits are resolved on 15m candles by default** (`--exec-interval`) — resolving on 1h candles would quadruple the uncertainty.
 
-### Юуг загварчлаагүй вэ
+#### What It Doesn't Model {#what-it-doesnt-model}
 
-Liquidation, захиалгын хэсэгчилсэн биелэлт, exchange info-гийн тоймлолт
-(`stepSize`/`minNotional`), maker/taker шатлал, биржийн тасалдал.
+Liquidation, partial order fills, exchange\-info rounding (stepSize/minNotional), maker/taker fee tiers, exchange outages.
 
-### Эрт зогссон ажиллагаа
+#### Early\-Stopped Runs {#early-stopped-runs}
 
-Drawdown circuit breaker буудвал симуляц тэр цэгтээ зогсоно. Тайлан бүх
-өгөгдлийн хугацаагаар биш, **үнэхээр арилжаа хийсэн хугацаагаар** хэмжинэ —
-эс тэгвээс "сард X%" ба BTC-тэй харьцуулалт хоёулаа арилжаагүй өдрүүдийг
-тоолж, ботыг байснаас нь дээр харагдуулна. Толгойд нь хэдэн хоногийн
-өгөгдлийн хэд дэх өдөр дээр зогссоныг бичнэ.
+If the drawdown circuit breaker trips, the simulation stops right there. The report is measured over the period actually traded, not the full data period — otherwise both the "X% per month" figure and the BTC comparison would count the non\-trading days too and make the bot look better than it is. The header notes which day, out of how many days of data, the run stopped on.
 
-### `--no-halt`: бүтэн хугацааг хэмжих
+#### `--no-halt`\: Measuring the Full Period {#no-halt-measuring-the-full-period}
 
-Одоогийн тохиргоогоор бот эхний долоо хоногт 15%-ийн хязгаартаа хүрч зогсдог.
-Тэр үед `--days 90` ажиллуулсан ч **зөвхөн тэр долоо хоногийг л хэмжинэ** —
-`--days 30` ба `--days 90` ижил үр дүн өгнө, үлдсэн өгөгдөл дэмий татагдана.
+With the current settings, the bot hits its 15% limit and stops within the first week. Run `--days 90` at that point and it still only measures that one week — `--days 30` and `--days 90` give the same result, and the rest of the data is fetched for nothing.
 
-`--no-halt` нь breaker-ыг унтраан бүтэн хугацааг ажиллуулна. Тайлан нь **амьд
-бот хэдэн дэх өдөр зогсох байсныг** тусад нь хэлнэ (realized баланс дээр
-тооцно — амьд breaker walletBalance хардаг), тиймээс нэг ажиллагаанаас хоёр
-хариу гарна: урт хугацааны зан төлөв, мөн одоогийн хязгаар хаана таслах вэ.
+`--no-halt` disables the breaker and runs the full period. The report separately notes which day the live bot would have stopped on (computed on the realized balance — the live breaker watches `walletBalance`), so a single run gives two answers: long\-run behavior, and where the current limit would cut it off.
 
-### `--sweep`: хувилбарууд харьцуулах
+#### `--sweep`\: Comparing Variants {#sweep-comparing-variants}
 
-Нэг тохиргоо турших бүрд бүтэн ажиллагаа хийвэл (өгөгдөл татах + 90 хоног
-симуляц) хэдэн цаг зарцуулна. Гэтэл **лаа шинжлэх нь хугацааны ~85%-ыг эзэлдэг
-бөгөөд тохиргооноос хамаардаггүй**: `min_signal_score`, зөвшөөрөгдсөн горим,
-хэсэгчилсэн TP — бүгд шинжилгээний ДАРАА, `pick_candidates` ба захиалга
-байрлуулах шатанд л нөлөөлдөг.
+Running a full pass for every config to test (fetch data \+ 90\-day simulation) takes hours. But candle analysis eats \~85% of that time and doesn't depend on the config — `min_signal_score`, allowed regimes, partial TP all only affect the stage AFTER analysis, in `pick_candidates` and order placement.
 
-Тиймээс `--sweep` нь шинжилгээг нэг удаа тооцоолж, бүх хувилбарт хуваалцана.
+So `--sweep` computes the analysis once and shares it across all variants.
 
-Кэш нь **бүх стратегийг идэвхтэй, босгыг 0** болгож баригдана — эс тэгвээс
-тухайн үеийн тохиргооноос сул хувилбарууд арилжаагаа чимээгүй алдаж, "муу"
-гэж худал харагдана. Жинхэнэ шүүлт нь `pick_candidates` дотор хэвээр хийгддэг
-тул үр дүн нь кэшгүй ажиллуулсантай **яг ижил** (тест үүнийг шалгадаг).
+The cache is built with every strategy enabled and the threshold at 0, otherwise variants looser than whatever config built the cache would silently lose trades and look falsely "worse." The actual filtering still happens inside `pick_candidates`, so results are identical to running without a cache (a test verifies this).
 
-Анхдагч хувилбарууд: жишиг, зөвхөн STRONG_TREND, trend горимууд, partial TP
-унтраасан, min_score 24, STRONG_TREND + partial TP off.
+Default variants: baseline, STRONG\_TREND\-only, trend regimes, partial TP off, min\_score 24, STRONG\_TREND \+ partial TP off.
 
-Sweep нь breaker-ыг **үргэлж унтраадаг** — хувилбарууд өөр өөр өдөр зогсвол
-тус бүр өөр хугацаа хэмжиж, харьцуулалт утгагүй болно. Аль нь хэзээ зогсох
-байсныг тайлан тусад нь хэлнэ.
+Sweep always disables the breaker — if variants stopped on different days, each would measure a different period and the comparison would be meaningless. The report separately notes when each one would have stopped.
 
-⚠️ Хамгийн сайн хувилбарыг НЭГ хугацаанаас сонгож байгаа тул тэр нь зүгээр л
-тэнд таарсан байж болно. Ялагчийг **өөр хугацаан дээр** заавал шалгана.
+> ⚠️ The best variant is being picked from a SINGLE period, so it might just have gotten lucky there. Always verify the winner on a different period.
 
-### `--offset-days`: өөр хугацаанд шалгах
+#### `--offset-days`\: Testing on a Different Period {#offset-days-testing-on-a-different-period}
 
-Анхдагчаар цонх нь өнөөдрөөр төгсдөг тул **бүх ажиллагаа ижил сүүлийн үеийг
-хэмжинэ**. Sweep-ээс шилдэг хувилбар сонгох нь тэр үед overfitting болно —
-6 хувилбараас хамгийн сайныг сонгож байгаа тул нэг нь зүгээр л таарсан байх
-магадлал өндөр.
+By default the window ends today, so every run measures the same recent period. Picking the best variant from a sweep is then overfitting — with 6 variants, the odds are decent that one just got lucky.
 
-`--offset-days N` нь цонхны төгсгөлийг N хоногоор ухраана:
+`--offset-days N` pushes the end of the window back by N days:
 
 ```bash
-python backtest.py --days 91 --sweep                     # энэ улирал
-python backtest.py --days 91 --offset-days 91  --sweep   # өмнөх улирал
-python backtest.py --days 91 --offset-days 182 --sweep   # түүнээс өмнөх
+python backtest.py --days 91 --sweep                     # this quarter
+python backtest.py --days 91 --offset-days 91  --sweep   # previous quarter
+python backtest.py --days 91 --offset-days 182 --sweep   # the quarter before that
 ```
 
-**Гурвуулаа дээр ижил хувилбар ялж байвал** тэр нь бодит, эс тэгвээс азаар
-таарсан. Шийдвэр гаргахаас өмнөх сүүлчийн шалгуур нь энэ.
+If the same variant wins across all three, it's real; otherwise it just got lucky. This is the last check before making a decision.
 
-Sweep нь breaker унтраалттай ажилладаг тул зарим хувилбарын өгөөж нь **жинхэнэ
-бот дээр хүрэх боломжгүй** тоо байдаг — тэр нь хязгаарт хүрч зогссоны дараах
-"хязгааргүй байсан бол" гэсэн таамгийг агуулна. Тиймээс хүснэгтэд `❌`-ээр
-тэмдэглээд, "хамгийн сайн" сонголтоос **хасна**. Бүгд хязгаарт хүрвэл ялагч
-зарлахгүй — эрсдэлийн бүтцийг эхлээд өөрчлөх ёстой гэсэн үг.
+Since sweep runs with the breaker off, some variants' returns are numbers the real bot could never reach — they include the "what if there'd been no limit" assumption past the point it would have stopped. Those are marked ❌ in the table and excluded from "best." If everything hits the limit, no winner is declared — that means the risk structure needs to change first.
 
-### `--windows`: чимээнээс дээгүүр гарах
+#### `--windows`\: Rising Above the Noise {#windows-rising-above-the-noise}
 
-Нэг цонхны ганц тоонд итгэж болохгүй. Жишээ нь 167 арилжаа, нэг арилжааны
-стандарт хазайлт ~$52 бол:
+A single number from a single window can't be trusted. For example, with 167 trades and a per\-trade standard deviation of \~$52:
 
 ```
-нийлбэрийн хазайлт = √167 × $52 ≈ $672 ≈ дансны 10.6%
+aggregate deviation = √167 × $52 ≈ $672 ≈ 10.6% of the account
 ```
 
-Өөрөөр хэлбэл **нэг цонхон дээрх 10%-аас доош ялгаа нь юу ч хэлдэггүй**. Үүнийг
-бодитоор баталсан: ижил тохиргоог хэдхэн цагийн зөрүүтэй хоёр удаа ажиллуулахад
-жишиг хувилбар +3.96% ба −4.64% гарсан.
+In other words, a difference under 10% within a single window means nothing. This was confirmed in practice: running the same config twice, hours apart, produced \+3.96% and −4.64% for the baseline variant.
 
-`--windows N` нь sweep-ийг **давхцаагүй** N цонхон дээр давтаж, хувилбар бүрийн
-дундаж, хамгийн муу/сайн, хэдэн цонхонд эерэг байсныг харуулна. Давхцуулбал
-ижил өгөгдлийг дахин тоолж итгэлийг хиймлээр өсгөх тул алхам нь цонхны урттай
-тэнцүү.
+`--windows N` repeats the sweep across N non\-overlapping windows, and reports each variant's average, worst/best, and how many windows it was positive in. Windows aren't overlapped — that would double\-count the same data and artificially inflate confidence — so the step size equals the window length.
 
-Шалгуур нь ганц тоо биш: **бүх цонхонд эерэг БА хэзээ ч 15% хязгаарт хүрээгүй**
-хувилбарууд л жагсаалтад орно. 4 цонхонд дараалан эерэг байх нь санамсаргүйгээр
-тохиох магадлал 6.2% — энэ нь нотолгоо.
+The criterion isn't a single number: only variants positive in EVERY window AND that never hit the 15% limit make the list. Being positive across 4 consecutive windows by chance has a 6.2% probability — that counts as evidence.
 
-⚠️ Цонх бүр өөрийн өгөгдлөө татдаг тул `--windows 4 --days 60` ≈ 40-60 минут.
-Санах ойд зөвхөн тоог хадгална (цонх бүрийн ~200 MB өгөгдлийг шууд суллана).
+> ⚠️ Each window fetches its own data, so `--windows 4 --days 60` ≈ 40–60 minutes. Only the numbers are kept in memory (each window's \~200 MB of data is released immediately).
 
-### Тайлан юу хэлэх вэ
+## What the Report Shows {#what-the-report-shows}
 
-Баланс, win rate, expectancy, profit factor, max drawdown, дундаж барилт —
-дээр нь **зардлын задаргаа** (бохир ашгийн хэдэн хувийг шимтгэл+funding идэв),
-**стратеги тус бүрийн** ашиг, **онооны бүлэг** (`min_signal_score` зөв эсэх),
-**гарцын шалтгаан**, **зах зээлийн горим**, мөн жишиг болгож BTC-г зүгээр
-барьсан үр дүн.
+Balance, win rate, expectancy, profit factor, max drawdown, average hold time — plus a cost breakdown (how much of gross profit fees \+ funding ate), per\-strategy P&L, score buckets (whether `min_signal_score` is set right), exit reasons, market regime, and a plain buy\-and\-hold BTC benchmark.
 
-### Хаанаас өгөгдөл авдаг вэ
+## Where the Data Comes From {#where-the-data-comes-from}
 
-Түүхэн лаа болон funding-ыг **үргэлж production эндпойнтоос** (`backtest_data_url`,
-анхдагчаар `https://fapi.binance.com`) уншина — demo/testnet-ийн түүх богино
-эсвэл бодит бус байдаг тул backtest утгагүй болно. Эдгээр нь нээлттэй өгөгдөл
-тул API түлхүүр шаардахгүй; арилжааны зам нь `BINANCE_BASE_URL` дээрээ хэвээр.
+Historical candles and funding are always read from the production endpoint (`backtest_data_url`, default `https://fapi.binance.com`) — demo/testnet history is too short or unrealistic to backtest meaningfully. This is public data, so no API key is needed; the live trading path still uses `BINANCE_BASE_URL`.
 
-### Хугацаа (хэмжсэн)
+## Timing (Measured) {#timing-measured}
 
-15 coin дээр: **10 өдөр ≈ 1.5 мин, 30 өдөр ≈ 4 мин, 90 өдөр ≈ 14 мин** симуляц.
-Дээр нь өгөгдөл татах 1–2 мин (~165 хүсэлт, хуудаслалттай).
+With 15 coins: 10 days ≈ 1.5 min, 30 days ≈ 4 min, 90 days ≈ 14 min of simulation. Plus 1–2 min for data fetching (\~165 paginated requests).
 
-`--sweep` нь 6 хувилбарыг **15 минутад** гүйцэтгэнэ — дараалан ажиллуулбал
-83 минут болно, өөрөөр хэлбэл **5.6 дахин хурдан**. Дээд санах ой 268 MB.
-Тиймээс үндсэн ботоо хөндөхгүйгээр тусад нь ажиллуулах нь зөв.
+`--sweep` runs 6 variants in 15 minutes — running them sequentially would take 83 minutes, so it's 5.6x faster. Peak memory is 268 MB. Best run separately, without touching the main bot.
 
-## Тохируулах
+## Configuration {#configuration}
 
-### 1. Нууц утгууд — `.env`
+#### 1\. Secrets — `.env` {#1-secrets-env}
 
-`env.example`-ийг хуулж `.env` болгоод бөглөнө:
+Copy `env.example` to `.env` and fill it in:
 
-```
+```bash
 BINANCE_API_KEY=...
 BINANCE_API_SECRET=...
-BINANCE_BASE_URL=https://demo-fapi.binance.com   # demo. Бодит: https://fapi.binance.com
+BINANCE_BASE_URL=https://demo-fapi.binance.com   # demo. Live: https://fapi.binance.com
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
-STATE_DIR=/data                                  # persistent volume (доороос үз)
+STATE_DIR=/data                                  # persistent volume (see below)
 LOG_LEVEL=INFO                                   # DEBUG/INFO/WARNING/ERROR
 ```
 
-### 2. Стратегийн тохиргоо — `config.json`
+#### 2\. Strategy Configuration — `config.json` {#2-strategy-configuration-configjson}
 
-Түгээмэл өөрчилдөг утгууд:
+Commonly changed values:
 
-| Түлхүүр | Утга | Тайлбар |
-|---|---|---|
-| `trade_allocation` | 0.09 | Позиц бүрд балансын хэдэн хувийг маржин болгох |
-| `leverage` | 5 | Хөшүүрэг |
-| `max_selections` | 6 | Зэрэг байх позицын дээд тоо |
-| `max_candidates_per_strategy` | 3 | Стратеги бүрээс хэдэн coin дэвшүүлэх |
-| `min_signal_score` | 14.0 | Онооны босго |
-| `correlation_threshold` | 0.85 | Үүнээс дээш хамааралтай бол хасна |
-| `max_session_drawdown_pct` | 15.0 | Circuit breaker |
-| `selection_interval_minutes` | 120 | Screening давтамж |
+| Key | Value | Description |
+| --- | --- | --- |
+| `trade_allocation` | 0\.09 | What % of the balance becomes margin per position |
+| `leverage` | 5 | Leverage |
+| `max_selections` | 6 | Max number of simultaneous positions |
+| `max_candidates_per_strategy` | 3 | How many coins each strategy can put forward |
+| `min_signal_score` | 14\.0 | Score threshold |
+| `correlation_threshold` | 0\.85 | Drops anything more correlated than this |
+| `max_session_drawdown_pct` | 15\.0 | Circuit breaker |
+| `selection_interval_minutes` | 120 | Screening cadence |
 
-**`min_signal_score`-г өөрчлөхдөө**: стратегиудын дээд оноо 22.5–27.2 хооронд
-байдаг. 20 гэдэг нь бараг таазанд байрлаж, бараг төгс нөхцөл шаарддаг (стратеги
-бүр 6–29% магадлалтай давна). 14 дээр 40–64% болдог. Хэт доогуур бол сул signal
-орно, хэт өндөр бол зарим стратеги бүрмөсөн унтардаг.
+When changing `min_signal_score`\: strategies' max scores range 22.5–27.2. 20 sits near the ceiling and requires near\-perfect conditions (each strategy clears it only 6–29% of the time). At 14 that becomes 40–64%. Too low lets weak signals through; too high shuts some strategies off entirely.
 
-**`selection_interval_minutes`-г өөрчлөх бол** `strategy_cooldown_cycles`-г
-хамт тааруулах — cooldown нь цаг биш **цикл**-ээр тоологддог.
+If you change `selection_interval_minutes`, adjust `strategy_cooldown_cycles` along with it — cooldown is counted in cycles, not minutes.
 
-### Гарах бүтэц: TP / SL / trailing-ийг тусад нь бүү өөрчил
+#### Exit Structure: Don't Change TP / SL / Trailing in Isolation {#exit-structure-dont-change-tp-sl-trailing-in-isolation}
 
-Эдгээр 4 утга хамтдаа нэг математикийг бүрдүүлдэг. Хожил хэр том, алдагдал хэр
-том байхыг тодорхойлох тул **ашигтай байхад шаардлагатай хожлын хувийг** шууд
-хардаг:
+These 4 values together form a single piece of math. They determine how big wins and losses are, which directly sets the win rate needed to be profitable:
 
-| | TP | SL | trailing | TP-ээр гарвал | trailing-ээр гарвал |
-|---|---|---|---|---|---|
-| Хуучин | 3.0% | 5.0% | 1.0% / 0.5% | босго **63.5%** | босго **92.4%** |
-| Одоо | 4.5% | 3.0% | 3.0% / 1.0% | босго **41.1%** | босго **61.6%** |
+| {} | TP | SL | Trailing | Breakeven win rate (TP exit) | Breakeven win rate (trailing exit) |
+| --- | --- | --- | --- | --- | --- |
+| Old | 3\.0% | 5\.0% | 1\.0% / 0.5% | 63\.5% | 92\.4% |
+| Now | 4\.5% | 3\.0% | 3\.0% / 1.0% | 41\.1% | 61\.6% |
 
-Хуучин бүтэц нь 5 эрсдэлдэж 3 хожихоор тавигдсан бөгөөд trailing нь +1%-д
-идэвхжиж 0.5% ухармагц хаадаг тул ихэнх хожил +0.5% орчимд таслагддаг байв.
-Тооцоолбол тэр бүтэц **70% хожлын хувьтай ч арилжаа тутам −0.36%** буюу
-алдагдалтай. Одоогийн бүтэц ~50%-аас дээш хожвол эерэг болно.
+The old structure risked 5 to win 3, and since trailing activated at \+1% and closed on a 0.5% pullback, most wins were cut around \+0.5%. Calculated out, that structure was net −0.36% per trade even at a 70% win rate. The current structure turns positive above roughly a 50% win rate.
 
-Trailing нь TP-той хамт ажилладаг тул **тусад нь өөрчилж болохгүй**: activation
-хэт нам бол хожлыг эрт тасалж, TP-г өсгөсөн ч утгагүй болно.
+Trailing works together with TP, so it can't be changed in isolation: if activation is too low, it cuts wins short and raising TP becomes pointless.
 
-⚠️ Эдгээр тоо нь бүтцийн хувьд илүү зөв боловч **бодит өгөгдлөөр батлагдаагүй**.
-SL-ийг 5% → 3% болгосон нь stop-д цохиулах давтамжийг нэмэгдүүлж, хожлын хувийг
-бууруулж болзошгүй — хоёр нөлөө эсрэг тэсрэг чиглэнэ. 30+ хаагдсан арилжааны
-дараа `min_signal_score`-той адил дахин үнэлэх ёстой.
+> ⚠️ These numbers are structurally sounder, but not yet validated on real data. Tightening SL from 5% to 3% likely increases how often it gets hit, lowering the win rate — two effects pulling in opposite directions. Re\-evaluate this after 30\+ closed trades, same as `min_signal_score`.
 
-### Ашиг тооцоолол шимтгэлтэй
+## Profit Accounting Includes Fees {#profit-accounting-includes-fees}
 
-`get_trade_realized_pnl` нь Binance-ийн `realizedPnl` дээр `commission`-ыг
-хасдаг. `realizedPnl` нь шимтгэлгүй дүн тул үүнгүйгээр бүртгэсэн ашиг үргэлж
-өндөр гарч, +$1 gross атлаа сөрөг net арилжаа "хожил" болж win rate хиймлээр
-өсдөг. Шимтгэлийг BNB-ээр төлсөн бол ханшгүйгээр хасахгүй, зөвхөн анхааруулна.
+`get_trade_realized_pnl` subtracts commission from Binance's `realizedPnl`. Since `realizedPnl` excludes fees, logging profit without this subtraction always overstates it — a trade that's \+$1 gross but net\-negative would falsely count as a "win," inflating the win rate. If fees were paid in BNB, they aren't converted and subtracted (no price feed for that) — it's only flagged.
 
-## Ажиллуулах
+## Running {#running}
 
 ```bash
 pip install -r requirements.txt
 python bot.py
 ```
 
-### Тест
+## Testing {#testing}
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -v                                    # 234 тест
+pytest -v                                    # 234 tests
 pytest --cov=. --cov-report=term-missing
 ```
 
-Тестүүд сүлжээ рүү огт хандахгүй: `conftest.py` дэх autouse fixture нь `requests`-ийг
-блоклож, Telegram-ыг мок болгож, state файлуудыг `tmp_path` руу чиглүүлж, runtime
-state-ийг тест бүрийн өмнө цэвэрлэдэг.
+Tests never touch the network: an autouse fixture in `conftest.py` blocks `requests`, mocks Telegram, redirects state files to `tmp_path`, and clears runtime state before every test.
 
-## Railway дээр deploy хийх
+## Deploying on Railway {#deploying-on-railway}
 
-`railway.toml` дотор `startCommand = "python bot.py"`.
+In `railway.toml`\: `startCommand = "python bot.py"`.
 
-### Volume заавал хэрэгтэй
+**A volume is required.** Without one, every redeploy creates a fresh container and the state files are lost. The consequences:
 
-Volume-гүй бол redeploy болгонд контейнер шинээр үүсч, state файлууд алга болно.
-Үр дагавар:
+- The drawdown peak resets → the circuit breaker "forgives" prior losses
+- Open positions lose their strategy tag and become `RECOVERED`
 
-- Drawdown-ы оргил утга тэглэгдэнэ → circuit breaker өмнөх алдагдлыг "уучилна"
-- Нээлттэй позицууд стратегиэ алдаж `RECOVERED` болно
+To set it up:
 
-**Тохируулах**:
-1. Project canvas дээр үйлчилгээн дээрээ баруун товших (эсвэл `+ New`) → **Volume**
+1. On the project canvas, right\-click your service (or **\+ New**) → **Volume**
 2. Mount path: `/data`
-3. **Variables** → `STATE_DIR` = `/data`
+3. Variables → `STATE_DIR = /data`
 
-Гар утаснаас хийж байвал browser дээрээ "Desktop site" горим асаах нь хялбар.
+If doing this from a phone, turning on "Desktop site" mode in the browser makes it easier.
 
-**Шалгах** — Deploy Logs дотор:
+To verify — in the Deploy Logs:
 
 ```
-💾 State хадгалалт: /data (persistent volume)     ← зөв
-⚠️ State хадгалалт: ... түр зуурын диск!          ← STATE_DIR хүрээгүй
+💾 State storage: /data (persistent volume)     ← correct
+⚠️ State storage: ... temporary disk!           ← STATE_DIR not mounted
 ```
 
-Volume холбогдсон үед log нь `/data/bot.log` руу ч бичигдэнэ (5 MB × 3 файл
-эргэлдэнэ), тиймээс redeploy хийсний дараа өмнөх түүх үлдэнэ.
+Once the volume is attached, logs are also written to `/data/bot.log` (rotating 5 MB × 3 files), so history survives past a redeploy.
 
-## Файлын бүтэц
+## File Structure {#file-structure}
 
-Модулиуд доороос дээш нэг чиглэлд хамаарна — доод давхаргынх нь дээдийгээ
-хэзээ ч импортлохгүй, тиймээс circular import үүсэхгүй.
+Modules form a one\-directional dependency chain bottom to top — a lower layer never imports from a layer above it, so there are no circular imports.
 
-| Файл | Мөр | Юу байдаг |
-|---|---:|---|
-| `bot.py` | 278 | Оруулах цэг: тохиргоо шалгах, эхлүүлэх, үндсэн давталт |
-| **Гүйцэтгэл** | | |
-| `execution.py` | 222 | Сонгогдсон signal-уудыг захиалга болгох |
-| `position_manager.py` | 682 | Позицын амьдралын мөчлөг: хамгаалалт, хяналт, хаалт, сэргээлт |
-| `screening.py` | 315 | Coin шинжлэх, корреляци, циклийн сонголт |
-| **Шийдвэр** | | |
-| `strategies.py` | 217 | Зах зээлийн горим, стратеги бүрийн signal ба оноо |
-| `indicators.py` | 168 | Техникийн индикаторууд (гадаад хамааралгүй, цэвэр функцууд) |
-| `risk.py` | 171 | Drawdown breaker, стратегийн түр зогсоолт, realized PnL бүртгэл |
-| **Биржийн давхарга** | | |
-| `order_api.py` | 233 | Захиалга байрлуулах/цуцлах (conditional захиалга Algo service дээр) |
-| `account.py` | 141 | Данс, позиц, leverage, realized PnL |
-| `market_data.py` | 260 | Klines, exchange info, тоймлолт, min notional |
-| `binance_client.py` | 116 | REST давхарга: гарын үсэг, хүсэлт, rate limit, серверийн цаг |
-| **Дэд бүтэц** | | |
-| `state.py` | 91 | Runtime state (`BotState` объект) — нэг эх сурвалж |
-| `settings.py` | 175 | `.env` + `config.json`-оос тохиргоо ачаалах |
-| `persistence.py` | 127 | State файлуудыг унших/бичих |
-| `logging_setup.py` | 68 | Log тохиргоо (консол + volume дээрх файл) |
-| `notifications.py` | 35 | Telegram илгээлт |
-| `reports.py` | 94 | Telegram тайлангууд |
-| `telegram_format.py` | — | Telegram мессежийн формат |
-| `utils.py` | 37 | Жижиг туслахууд (safe_float, clamp, round_down…) |
-| **Нэмэлт** | | |
-| `journal.py` | 81 | Хаагдсан арилжааг орох нөхцөлтэй нь CSV-д бүртгэх |
-| `news.py` | 244 | Мэдээний цагийн хуваарь ба дараах арилжаа |
-| `backtest.py` | 743 | Портфелийн симуляц: ботын шийдвэрийн кодыг түүхэн лаан дээр |
-| `test_bot.py`, `conftest.py` | — | Тестүүд |
+| File | Lines | Layer | What's in it |
+| --- | --- | --- | --- |
+| `bot.py` | 278 | — | Entry point: config checks, startup, main loop |
+| `execution.py` | 222 | Execution | Turns selected signals into orders |
+| `position_manager.py` | 682 | Execution | Position lifecycle: protection, monitoring, closing, recovery |
+| `screening.py` | 315 | Execution | Coin analysis, correlation, cycle selection |
+| `strategies.py` | 217 | Decision | Market regime, per\-strategy signal and score |
+| `indicators.py` | 168 | Decision | Technical indicators (no external deps, pure functions) |
+| `risk.py` | 171 | Decision | Drawdown breaker, strategy cooldown, realized PnL tracking |
+| `order_api.py` | 233 | Exchange layer | Place/cancel orders (conditional orders via the Algo service) |
+| `account.py` | 141 | Exchange layer | Account, positions, leverage, realized PnL |
+| `market_data.py` | 260 | Exchange layer | Klines, exchange info, rounding, min notional |
+| `binance_client.py` | 116 | Exchange layer | REST layer: signing, requests, rate limiting, server time |
+| `state.py` | 91 | Infrastructure | Runtime state (`BotState` object) — single source of truth |
+| `settings.py` | 175 | Infrastructure | Loads config from `.env` \+ `config.json` |
+| `persistence.py` | 127 | Infrastructure | Reads/writes state files |
+| `logging_setup.py` | 68 | Infrastructure | Log config (console \+ file on the volume) |
+| `notifications.py` | 35 | Infrastructure | Telegram sending |
+| `reports.py` | 94 | Infrastructure | Telegram reports |
+| `telegram_format.py` | — | Infrastructure | Telegram message formatting |
+| `utils.py` | 37 | Infrastructure | Small helpers (`safe_float`, `clamp`, `round_down`…) |
+| `journal.py` | 81 | Extras | Logs closed trades with their entry context to CSV |
+| `news.py` | 244 | Extras | News event schedule and the post\-event trade |
+| `backtest.py` | 743 | Extras | Portfolio simulation: runs the bot's decision code over historical candles |
+| `test_bot.py`, `conftest.py` | — | Extras | Tests |
 
-### Модуль хооронд хэрхэн дууддаг вэ
+## How Modules Call Each Other {#how-modules-call-each-other}
 
-Модулиуд бие биенээсээ **нэр биш, модуль** импортолдог:
+Modules import other modules, not names from them:
 
 ```python
 import account
 positions = account.get_positions()      # ✅
 ```
 
-`from account import get_positions` гэж бичихгүй. Учир нь тэгвэл нэр хуулбарлагдаж,
-дараа нь `account.get_positions`-ыг солиход (тест эсвэл засварын үед) хуучин
-хуулбар нь хэвээр үлдэнэ. Энэ бол `state.py` үүссэн шалтгаантай яг ижил занга.
+Never `from account import get_positions`. That copies the name, so if `account.get_positions` is later replaced (in a test or a patch), the old copy keeps pointing at the original. It's the exact same trap that `state.py` exists to avoid.
 
-Мөн `config.json`-ы тогтмолууд `from settings import *`-аар модуль бүрд
-хуулбарлагддаг тул тестэд нэгийг нь солихдоо `conftest.patch_setting()` ашиглаж
-**бүх модульд нэгэн зэрэг** солино.
+Similarly, `config.json` constants get copied into every module via `from settings import *`, so tests use `conftest.patch_setting()` to override one everywhere at once.
 
-### State яагаад тусдаа файлд байдаг вэ
+## Why State Lives in Its Own File {#why-state-lives-in-its-own-file}
 
-`safety_lock`, `strategy_stats`, drawdown-ы оргил зэрэг өөрчлөгддөг утгууд
-`state` объектын атрибут байдаг. Энэ нь module-level global байсан бол кодыг
-модуль болгон хуваахад `from state import safety_lock` → `safety_lock = True`
-гэж бичихэд зөвхөн локал нэр солигдож, бусад модуль хуучин утгыг хараад
-**арилжаа зогсох ёстой газраа зогсохгүй** байх эрсдэлтэй.
+Mutable values like `safety_lock`, `strategy_stats`, and the drawdown peak are attributes on the state object. If these were module\-level globals, splitting the code into modules and writing `from state import safety_lock` then `safety_lock = True` would only rebind the local name — other modules would keep seeing the old value, risking a case where trading fails to halt when it should.
 
-## Мэдэгдэж буй хязгаарлалт
+## Known Limitations {#known-limitations}
 
-- `position_manager.py` 682 мөр — цаашид хаалт/хяналтын хэсгийг салгаж болно
-- Сүлжээний timeout дээр retry байхгүй (rate limit дээр байгаа)
-- `rebuild_protection_orders` тестийн хамралт бага
-- Algo (conditional) захиалга жагсаах endpoint нь баримтжуулалтгүй тул
-  `ALGO_LIST_ENDPOINT_CANDIDATES` жагсаалтаас туршиж олдог. Аль нь ч ажиллахгүй
-  бол Telegram-д сэрэмжлүүлэг явна
+- `position_manager.py` is 682 lines — the close/monitor logic could still be split out
+- No retry on network timeouts (retry does exist for rate limits)
+- `rebuild_protection_orders` has low test coverage
+- The Algo (conditional) order listing endpoint is undocumented, so it's found by trying candidates from `ALGO_LIST_ENDPOINT_CANDIDATES`. If none of them work, a Telegram alert is sent.
