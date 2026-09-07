@@ -786,20 +786,30 @@ def format_sweep_report(results, data=None):
         add(f"Унтраасан стратеги: {', '.join(first['disabled'])}")
     add("=" * 78)
     add("")
-    add(f"  {'хувилбар':<32}{'n':>5}{'win%':>7}{'өгөөж':>9}{'expect$':>9}{'DD%':>7}{'PF':>6}")
-    add("  " + "-" * 74)
+    def breach_day(sim):
+        breach = sim.get("breach_ms")
+        return None if not breach else (breach - sim["from_ms"]) / (24 * HOUR_MS)
+
+    add(f"  {'хувилбар':<32}{'n':>5}{'win%':>7}{'өгөөж':>9}{'expect$':>9}{'DD%':>7}{'PF':>6}{'зогсох':>9}")
+    add("  " + "-" * 83)
 
     for sim in results:
         trades = sim["trades"]
         ret = (sim["final_balance"] - sim["start_balance"]) / sim["start_balance"] * 100
+        day = breach_day(sim)
+        stop = f"{day:.0f}д ❌" if day is not None else "—"
         if not trades:
-            add(f"  {sim['name']:<32}{0:>5}{'—':>7}{ret:>8.2f}%{'—':>9}{'—':>7}{'—':>6}")
+            add(f"  {sim['name']:<32}{0:>5}{'—':>7}{ret:>8.2f}%{'—':>9}{'—':>7}{'—':>6}{stop:>9}")
             continue
         nets = np.array([t["net"] for t in trades], dtype=float)
         wins, losses = nets[nets > 0], nets[nets < 0]
         pf = wins.sum() / abs(losses.sum()) if len(losses) and losses.sum() else float("inf")
         add(f"  {sim['name']:<32}{len(trades):>5}{(nets > 0).mean() * 100:>6.0f}%"
-            f"{ret:>8.2f}%{nets.mean():>9.2f}{_max_drawdown(sim['equity_curve']):>6.1f}%{pf:>6.2f}")
+            f"{ret:>8.2f}%{nets.mean():>9.2f}{_max_drawdown(sim['equity_curve']):>6.1f}%{pf:>6.2f}{stop:>9}")
+
+    add("")
+    add("  ❌ = жинхэнэ бот тэр өдөр 15% хязгаарт хүрч ЗОГСОХ байсан. Тэдгээрийн")
+    add("     өгөөж нь breaker унтраалттай байсны үр дүн — бодитоор хүрэхгүй.")
 
     add("")
     add("─ ЖИНХЭНЭ БОТ ХЭЗЭЭ ЗОГСОХ БАЙСАН (15% breaker) ─────────────────────────────")
@@ -824,10 +834,21 @@ def format_sweep_report(results, data=None):
             add("")
             add(f"ЖИШИГ: BTC зүгээр барьсан бол {bh:+.2f}% ({days:.0f} хоног)")
 
-    best = max(results, key=lambda s: s["final_balance"])
+    # Хязгаарт хүрэх хувилбарыг "хамгийн сайн" гэж сонгож болохгүй: тэдний
+    # өгөөж нь зөвхөн breaker унтраалттай байсан учраас гарсан тоо. Жинхэнэ
+    # бот дээр тэр өдөр зогсоод цаашид арилжаа хийхгүй.
+    achievable = [sim for sim in results if not sim.get("breach_ms")]
     add("")
-    add(f"🥇 Хамгийн сайн: {best['name']} "
-        f"({(best['final_balance'] - best['start_balance']) / best['start_balance'] * 100:+.2f}%)")
+    if achievable:
+        best = max(achievable, key=lambda s: s["final_balance"])
+        add(f"🥇 Хамгийн сайн (хүрэх боломжтой): {best['name']} "
+            f"({(best['final_balance'] - best['start_balance']) / best['start_balance'] * 100:+.2f}%)")
+        skipped = [sim["name"] for sim in results if sim.get("breach_ms")]
+        if skipped:
+            add(f"   Хязгаарт хүрсэн тул тооцоогүй: {', '.join(skipped)}")
+    else:
+        add("⚠️ БҮХ хувилбар 15% хязгаарт хүрнэ — аль нь ч жинхэнэ бот дээр")
+        add("   ажиллахгүй. Эрсдэлийн бүтцийг өөрчлөхгүйгээр аль нэгийг сонгох нь утгагүй.")
     add("")
     add("⚠️ Эдгээрийг НЭГ хугацаанаас сонгож байгаа тул хамгийн сайн нь зүгээр л")
     add("   тэр хугацаанд таарсан байж болно. Ялагчийг ӨӨР хугацаан дээр заавал")

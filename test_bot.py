@@ -4144,7 +4144,7 @@ class TestBacktestSweep:
         report = backtest.format_sweep_report(results, synthetic_market)
 
         assert "ХУВИЛБАРУУДЫН ХАРЬЦУУЛАЛТ" in report
-        assert "🥇 Хамгийн сайн:" in report
+        assert "🥇 Хамгийн сайн" in report
         assert "ЖИНХЭНЭ БОТ ХЭЗЭЭ ЗОГСОХ БАЙСАН" in report
         assert "ӨӨР хугацаан дээр заавал" in report      # overfitting сануулга
 
@@ -4379,3 +4379,69 @@ class TestSweepCliPlumbing:
 
         assert results is None
         assert "Өгөгдөл татагдсангүй" in report
+
+
+class TestSweepWinnerExcludesBreaches:
+    """Хязгаарт хүрэх хувилбарыг "хамгийн сайн" гэж сонгож болохгүй.
+
+    Тэдний өгөөж нь breaker унтраалттай байсны үр дүн — жинхэнэ бот тэр өдөр
+    зогсоод цаашид арилжаа хийхгүй тул тэр тоонд хэзээ ч хүрэхгүй. Live
+    тайлан дээр яг ийм хувилбар "🥇 хамгийн сайн" болж гарсан.
+    """
+
+    def _sim(self, name, final, breach_ms=None, trades=3):
+        curve = [(0, 10_000.0, 10_000.0), (3_600_000, final, final)]
+        return {
+            "name": name, "start_balance": 10_000.0, "final_balance": final,
+            "trades": [{"net": 1.0} for _ in range(trades)],
+            "equity_curve": curve, "breach_ms": breach_ms,
+            "from_ms": 0, "to_ms": 3_600_000, "data_to_ms": 3_600_000,
+            "symbols": ["BTCUSDT"], "disabled": [], "total_gross": 1.0,
+            "total_fees": 0.0, "total_funding": 0.0, "halted": None,
+        }
+
+    def test_a_breaching_configuration_cannot_win(self):
+        results = [self._sim("зогссон", 12_000.0, breach_ms=2_000_000),
+                   self._sim("тогтвортой", 10_500.0)]
+
+        report = backtest.format_sweep_report(results)
+
+        assert "🥇 Хамгийн сайн (хүрэх боломжтой): тогтвортой" in report
+        assert "зогссон" not in report.split("🥇")[1].split("Хязгаарт хүрсэн")[0]
+
+    def test_the_excluded_configurations_are_named(self):
+        results = [self._sim("зогссон", 12_000.0, breach_ms=2_000_000),
+                   self._sim("тогтвортой", 10_500.0)]
+
+        report = backtest.format_sweep_report(results)
+
+        assert "Хязгаарт хүрсэн тул тооцоогүй: зогссон" in report
+
+    def test_the_table_marks_which_ones_would_stop(self):
+        results = [self._sim("зогссон", 12_000.0, breach_ms=2_000_000),
+                   self._sim("тогтвортой", 10_500.0)]
+
+        report = backtest.format_sweep_report(results)
+        row = next(line for line in report.split("\n") if line.strip().startswith("зогссон"))
+
+        assert "❌" in row
+        assert "❌" not in next(line for line in report.split("\n")
+                               if line.strip().startswith("тогтвортой"))
+
+    def test_when_every_configuration_breaches_none_is_crowned(self):
+        results = [self._sim("a", 12_000.0, breach_ms=2_000_000),
+                   self._sim("b", 11_000.0, breach_ms=3_000_000)]
+
+        report = backtest.format_sweep_report(results)
+
+        assert "🥇" not in report
+        assert "БҮХ хувилбар" in report
+
+    def test_the_best_of_several_clean_runs_still_wins(self):
+        results = [self._sim("сул", 10_200.0),
+                   self._sim("хүчтэй", 10_900.0),
+                   self._sim("зогссон", 20_000.0, breach_ms=2_000_000)]
+
+        report = backtest.format_sweep_report(results)
+
+        assert "🥇 Хамгийн сайн (хүрэх боломжтой): хүчтэй" in report
