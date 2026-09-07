@@ -137,32 +137,37 @@ def exec_bars_agree(signal_df, exec_df, samples=40, tolerance=0.02):
     return mismatched <= checked * 0.1
 
 
-def load_history(symbols, days, exec_interval="15m", progress=True, data_url=None):
+def load_history(symbols, days, exec_interval="15m", progress=True, data_url=None, offset_days=0):
     """Signal-ийн 1h лаа, гарц шийдэх нарийн лаа, funding түүх.
 
     Гарцыг 1h лаан дээр шийдэх нь хамгийн том худал эх сурвалж: нэг лаанд
     SL ба TP хоёул хүрсэн бол алийг нь эхэлж цохисныг мэдэх аргагүй. Илүү
     нарийн (15m) лаа ашиглах нь тэр тодорхойгүй байдлыг 4 дахин багасгана.
+
+    offset_days: цонхны төгсгөлийг өнөөдрөөс хэдэн хоногоор ухраах вэ. Ижил
+    тохиргоог хэд хэдэн ӨӨР хугацаанд шалгах цорын ганц арга — үүнгүйгээр
+    бүх ажиллагаа ижил сүүлийн үеийг хэмжиж, шилдэг хувилбар үнэхээр
+    ажилладаг уу эсвэл тэр хугацаанд таарсан уу гэдгийг ялгах боломжгүй.
     """
-    now_ms = binance_client.current_timestamp_ms()
+    end_ms = binance_client.current_timestamp_ms() - int(offset_days) * 24 * HOUR_MS
     # Warmup: signal цонх (600 лаа) + туршилтын хугацаа
-    start_ms = now_ms - (days * 24 + SIGNAL_WINDOW + 24) * HOUR_MS
+    start_ms = end_ms - (days * 24 + SIGNAL_WINDOW + 24) * HOUR_MS
     data = {}
 
     with market_data_source(data_url if data_url is not None else BACKTEST_DATA_URL):
         for n, symbol in enumerate(symbols, 1):
             if progress:
                 log.info(f"📥 [{n}/{len(symbols)}] {symbol} өгөгдөл татаж байна...")
-            signal_df = market_data.get_klines_range(symbol, "1h", start_ms, now_ms)
+            signal_df = market_data.get_klines_range(symbol, "1h", start_ms, end_ms)
             if len(signal_df) < SIGNAL_WINDOW + 48:
                 log.warning(f"⚠️ {symbol}: хангалттай түүх алга ({len(signal_df)} лаа) — алгаслаа")
                 continue
-            exec_df = market_data.get_klines_range(symbol, exec_interval, start_ms, now_ms)
+            exec_df = market_data.get_klines_range(symbol, exec_interval, start_ms, end_ms)
             used_interval = exec_interval
             if not exec_bars_agree(signal_df, exec_df):
                 log.warning(f"⚠️ {symbol}: {exec_interval} лаа 1h-тэй таарахгүй — гарцыг 1h дээр шийднэ")
                 exec_df, used_interval = signal_df, "1h"
-            funding = market_data.get_funding_history(symbol, start_ms, now_ms) if FUNDING_ENABLED else []
+            funding = market_data.get_funding_history(symbol, start_ms, end_ms) if FUNDING_ENABLED else []
             data[symbol] = {
                 "signal": signal_df,
                 "exec": exec_df,
@@ -1009,9 +1014,10 @@ def format_report(sim, data=None):
 # ----------------------------------------------------------------
 
 def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress=True,
-        data_url=None, disabled=None, halt_on_drawdown=True):
+        data_url=None, disabled=None, halt_on_drawdown=True, offset_days=0):
     symbols = symbols or SYMBOLS_POOL
-    data = load_history(symbols, days, exec_interval=exec_interval, progress=progress, data_url=data_url)
+    data = load_history(symbols, days, exec_interval=exec_interval, progress=progress,
+                        data_url=data_url, offset_days=offset_days)
     if not data:
         return None, "❌ Өгөгдөл татагдсангүй."
     if start_balance is None:
@@ -1052,11 +1058,12 @@ def send_report_to_telegram(report):
 
 
 def run_sweep_cli(days=90, start_balance=None, symbols=None, exec_interval="15m",
-                  data_url=None, disabled=None, halt_on_drawdown=False, progress=True):
+                  data_url=None, disabled=None, halt_on_drawdown=False, progress=True,
+                  offset_days=0):
     """Sweep-ийн өгөгдөл ачаалах + ажиллуулах + тайлагнах."""
     symbols = symbols or SYMBOLS_POOL
     data = load_history(symbols, days, exec_interval=exec_interval, progress=progress,
-                        data_url=data_url)
+                        data_url=data_url, offset_days=offset_days)
     if not data:
         return None, "❌ Өгөгдөл татагдсангүй."
     if start_balance is None:
@@ -1076,6 +1083,9 @@ def main(argv=None):
     parser.add_argument("--symbols", type=str, default=None, help="таслалаар тусгаарласан symbol-ууд")
     parser.add_argument("--exec-interval", type=str, default="15m",
                         help="гарц шийдэх лааны давтамж (15m/5m). 1h нь хамгийн бүдүүлэг.")
+    parser.add_argument("--offset-days", type=int, default=0,
+                        help="цонхны төгсгөлийг өнөөдрөөс хэдэн хоногоор ухраах "
+                             "(ж: --days 91 --offset-days 91 = өмнөх улирал)")
     parser.add_argument("--sweep", action="store_true",
                         help="хэд хэдэн тохиргоог нэг ажиллагаагаар харьцуулна")
     parser.add_argument("--no-halt", action="store_true",
@@ -1087,6 +1097,8 @@ def main(argv=None):
     parser.add_argument("--csv", type=str, default=None, help="арилжаа бүрийг CSV-д бичих зам")
     parser.add_argument("--telegram", action="store_true", help="тайланг Telegram руу илгээх")
     args = parser.parse_args(argv)
+    if args.offset_days < 0:
+        parser.error("--offset-days сөрөг байж болохгүй")
 
     setup_logging(STATE_DIR, STATE_DIR_IS_PERSISTENT)
     binance_client.sync_server_time()
@@ -1107,7 +1119,7 @@ def main(argv=None):
         results, report = run_sweep_cli(
             days=args.days, start_balance=args.balance, symbols=symbols,
             exec_interval=args.exec_interval, data_url=args.data_url,
-            disabled=disabled, halt_on_drawdown=False,
+            disabled=disabled, halt_on_drawdown=False, offset_days=args.offset_days,
         )
         print(report)
         if results and args.telegram:
@@ -1116,7 +1128,8 @@ def main(argv=None):
 
     sim, report = run(days=args.days, start_balance=args.balance, symbols=symbols,
                       exec_interval=args.exec_interval, data_url=args.data_url,
-                      disabled=disabled, halt_on_drawdown=not args.no_halt)
+                      disabled=disabled, halt_on_drawdown=not args.no_halt,
+                      offset_days=args.offset_days)
     print(report)
 
     if sim and args.csv:

@@ -4215,3 +4215,167 @@ class TestBacktestSweepPartialTp:
 
         assert any(t["exit_reason"] == "BREAKEVEN" for t in on["trades"])
         assert not any(t["exit_reason"] == "BREAKEVEN" for t in off["trades"])
+
+
+class TestBacktestOffsetWindow:
+    """Ижил тохиргоог өөр хугацаанд шалгах.
+
+    Бүх ажиллагаа сүүлийн үеийг хэмжвэл шилдэг хувилбар үнэхээр ажилладаг уу,
+    эсвэл тэр хугацаанд таарсан уу гэдгийг ялгах боломжгүй — 6 хувилбараас
+    нэгийг сонгох нь өөрөө overfitting.
+    """
+
+    NOW = 1_800_000_000_000
+
+    @pytest.fixture
+    def window_spy(self, monkeypatch):
+        seen = {}
+
+        def fake_range(symbol, interval, start_ms, end_ms, **kw):
+            seen.setdefault(interval, []).append((start_ms, end_ms))
+            # Хангалттай урт байх ёстой — эс тэвэл symbol алгасагдаж,
+            # 15m ба funding огт татагдахгүй тул тест юу ч шалгахгүй
+            step = market_data.INTERVAL_MS[interval]
+            n = 700
+            return pd.DataFrame({
+                "time": [start_ms + i * step for i in range(n)],
+                "open": [100.0] * n, "high": [101.0] * n,
+                "low": [99.0] * n, "close": [100.0] * n, "volume": [1.0] * n,
+            })
+
+        monkeypatch.setattr(binance_client, "current_timestamp_ms", lambda: self.NOW)
+        monkeypatch.setattr(market_data, "get_klines_range", fake_range)
+        monkeypatch.setattr(market_data, "get_funding_history",
+                            lambda symbol, start_ms, end_ms: seen.setdefault("funding", []).append((start_ms, end_ms)) or [])
+        return seen
+
+    def test_no_offset_ends_at_now(self, window_spy):
+        backtest.load_history(["BTCUSDT"], days=30, progress=False)
+
+        _, end_ms = window_spy["1h"][0]
+        assert end_ms == self.NOW
+
+    def test_an_offset_moves_the_window_back(self, window_spy):
+        backtest.load_history(["BTCUSDT"], days=30, progress=False, offset_days=91)
+
+        _, end_ms = window_spy["1h"][0]
+        assert end_ms == self.NOW - 91 * 24 * 3_600_000
+
+    def test_the_start_moves_with_the_end(self, window_spy):
+        backtest.load_history(["BTCUSDT"], days=30, progress=False, offset_days=91)
+
+        start_ms, end_ms = window_spy["1h"][0]
+        span_hours = (end_ms - start_ms) / 3_600_000
+        assert span_hours == pytest.approx(30 * 24 + backtest.SIGNAL_WINDOW + 24)
+
+    def test_two_offsets_do_not_overlap(self, window_spy):
+        backtest.load_history(["BTCUSDT"], days=91, progress=False, offset_days=0)
+        recent_start, recent_end = window_spy["1h"][0]
+        window_spy["1h"].clear()
+
+        backtest.load_history(["BTCUSDT"], days=91, progress=False, offset_days=91)
+        older_start, older_end = window_spy["1h"][0]
+
+        # Warmup давхцаж болно, харин ТУРШИХ хэсэг нь давхцах ёсгүй
+        assert older_end <= recent_start + (backtest.SIGNAL_WINDOW + 24) * 3_600_000
+
+    def test_every_data_series_uses_the_same_window(self, window_spy):
+        backtest.load_history(["BTCUSDT"], days=30, progress=False, offset_days=45)
+
+        expected_end = self.NOW - 45 * 24 * 3_600_000
+        assert window_spy["1h"][0][1] == expected_end
+        assert window_spy["15m"][0][1] == expected_end
+        assert window_spy["funding"][0][1] == expected_end
+
+
+class TestBacktestOffsetCli:
+    @pytest.fixture
+    def cli(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(backtest, "run", lambda **kw: (seen.update(kw), ({"trades": []}, "т"))[1])
+        monkeypatch.setattr(backtest, "run_sweep_cli", lambda **kw: (seen.update(kw), ([{}], "т"))[1])
+        monkeypatch.setattr(backtest, "setup_logging", lambda *a, **kw: None)
+        monkeypatch.setattr(binance_client, "sync_server_time", lambda: None)
+        return seen
+
+    def test_offset_reaches_a_single_run(self, cli):
+        backtest.main(["--days", "91", "--offset-days", "91"])
+
+        assert cli["offset_days"] == 91
+
+    def test_offset_reaches_a_sweep(self, cli):
+        backtest.main(["--days", "91", "--offset-days", "182", "--sweep"])
+
+        assert cli["offset_days"] == 182
+
+    def test_the_default_offset_is_zero(self, cli):
+        backtest.main(["--days", "30"])
+
+        assert cli["offset_days"] == 0
+
+    def test_a_negative_offset_is_refused(self, cli):
+        with pytest.raises(SystemExit):
+            backtest.main(["--offset-days", "-5"])
+
+
+class TestSweepCliPlumbing:
+    """CLI → run_sweep_cli → load_history гинжин холбоос.
+
+    Хоёр захыг нь тестлээд дундахыг орхивол тохиргоо чимээгүй алдагдана —
+    sweep нь өөр хугацаа хэмжиж байгаа мэт харагдаад үнэндээ ижил сүүлийн
+    үеийг дахин хэмжинэ, out-of-sample шалгалт утгагүй болно.
+    """
+
+    @pytest.fixture
+    def plumbing(self, monkeypatch):
+        seen = {}
+
+        def fake_load(symbols, days, **kw):
+            seen.update(kw)
+            seen["days"] = days
+            return {"BTCUSDT": {}}
+
+        def fake_sweep(data, balance, **kw):
+            seen["sweep_kwargs"] = kw
+            return [{"trades": []}]
+
+        monkeypatch.setattr(backtest, "load_history", fake_load)
+        monkeypatch.setattr(backtest, "run_sweep", fake_sweep)
+        monkeypatch.setattr(backtest, "format_sweep_report", lambda results, data=None: "тайлан")
+        return seen
+
+    def test_the_offset_reaches_the_data_loader(self, plumbing):
+        backtest.run_sweep_cli(days=91, start_balance=1000.0, offset_days=182, progress=False)
+
+        assert plumbing["offset_days"] == 182
+
+    def test_the_default_offset_is_zero(self, plumbing):
+        backtest.run_sweep_cli(days=91, start_balance=1000.0, progress=False)
+
+        assert plumbing["offset_days"] == 0
+
+    def test_the_disabled_list_reaches_the_sweep(self, plumbing):
+        backtest.run_sweep_cli(days=91, start_balance=1000.0, progress=False,
+                               disabled=["MACD_MOMENTUM", "BREAKOUT"])
+
+        assert plumbing["sweep_kwargs"]["disabled"] == ["MACD_MOMENTUM", "BREAKOUT"]
+
+    def test_the_breaker_stays_off_for_a_sweep(self, plumbing):
+        # Хувилбарууд өөр өдөр зогсвол өөр хугацаа хэмжинэ — харьцуулалт унана
+        backtest.run_sweep_cli(days=91, start_balance=1000.0, progress=False)
+
+        assert plumbing["sweep_kwargs"]["halt_on_drawdown"] is False
+
+    def test_the_data_url_reaches_the_loader(self, plumbing):
+        backtest.run_sweep_cli(days=30, start_balance=1000.0, progress=False,
+                               data_url="https://fapi.binance.com")
+
+        assert plumbing["data_url"] == "https://fapi.binance.com"
+
+    def test_missing_data_is_reported_rather_than_crashing(self, monkeypatch):
+        monkeypatch.setattr(backtest, "load_history", lambda *a, **kw: {})
+
+        results, report = backtest.run_sweep_cli(days=30, start_balance=1000.0, progress=False)
+
+        assert results is None
+        assert "Өгөгдөл татагдсангүй" in report

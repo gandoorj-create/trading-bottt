@@ -202,6 +202,7 @@ python backtest.py --days 30 --exec-interval 5m --telegram
 python backtest.py --days 90 --disable MACD_MOMENTUM,BREAKOUT   # тодорхой стратегигүйгээр
 python backtest.py --days 90 --no-halt                          # drawdown breaker-гүйгээр бүтэн хугацаа
 python backtest.py --days 90 --sweep --disable MACD_MOMENTUM,BREAKOUT   # хувилбарууд харьцуулах
+python backtest.py --days 91 --offset-days 91 --sweep                   # өмнөх улирал (out-of-sample)
 ```
 
 **Гол зарчим: дуурайхгүй, ботын кодыг өөрийг нь ажиллуулна.** Симуляц нь
@@ -289,6 +290,24 @@ Sweep нь breaker-ыг **үргэлж унтраадаг** — хувилбар
 
 ⚠️ Хамгийн сайн хувилбарыг НЭГ хугацаанаас сонгож байгаа тул тэр нь зүгээр л
 тэнд таарсан байж болно. Ялагчийг **өөр хугацаан дээр** заавал шалгана.
+
+### `--offset-days`: өөр хугацаанд шалгах
+
+Анхдагчаар цонх нь өнөөдрөөр төгсдөг тул **бүх ажиллагаа ижил сүүлийн үеийг
+хэмжинэ**. Sweep-ээс шилдэг хувилбар сонгох нь тэр үед overfitting болно —
+6 хувилбараас хамгийн сайныг сонгож байгаа тул нэг нь зүгээр л таарсан байх
+магадлал өндөр.
+
+`--offset-days N` нь цонхны төгсгөлийг N хоногоор ухраана:
+
+```bash
+python backtest.py --days 91 --sweep                     # энэ улирал
+python backtest.py --days 91 --offset-days 91  --sweep   # өмнөх улирал
+python backtest.py --days 91 --offset-days 182 --sweep   # түүнээс өмнөх
+```
+
+**Гурвуулаа дээр ижил хувилбар ялж байвал** тэр нь бодит, эс тэгвээс азаар
+таарсан. Шийдвэр гаргахаас өмнөх сүүлчийн шалгуур нь энэ.
 
 ### Тайлан юу хэлэх вэ
 
