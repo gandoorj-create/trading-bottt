@@ -3925,3 +3925,134 @@ class TestBacktestCli:
 
         assert cli["days"] == 45
         assert cli["start_balance"] == pytest.approx(6356.0)
+
+
+class TestBacktestNoHalt:
+    """Drawdown breaker-ыг унтраан бүтэн хугацааг хэмжих.
+
+    Одоогийн тохиргоогоор бот эхний долоо хоногт 15%-ийн хязгаартаа хүрч
+    зогсдог. Тэр үед `--days 90` ажиллуулсан ч зөвхөн тэр долоо хоногийг л
+    хэмждэг — үлдсэн 85 хоног дэмий татагдана. Урт хугацааны зан төлөвийг
+    харахын тулд breaker-ыг унтраах хэрэгтэй.
+    """
+
+    @pytest.fixture
+    def tight_limit(self, monkeypatch, synthetic_market):
+        # synthetic_market нь хязгаарыг 0 болгодог тул түүнээс ХОЙШ тавина —
+        # эс тэгвээс fixture-ийн дараалал энэ тохиргоог дарж, breaker огт
+        # буудахгүй атлаа тестүүд "буудсан" гэж шалгах болно.
+        patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 0.5)
+        return synthetic_market
+
+    def test_with_the_breaker_on_the_run_stops_early(self, tight_limit):
+        sim = backtest.run_portfolio_backtest(tight_limit, 10_000.0, progress=False)
+
+        assert sim["halted"] == "DRAWDOWN_HALT"
+        assert sim["to_ms"] < sim["data_to_ms"]
+
+    def test_with_the_breaker_off_the_whole_period_is_measured(self, tight_limit):
+        sim = backtest.run_portfolio_backtest(tight_limit, 10_000.0, progress=False,
+                                              halt_on_drawdown=False)
+
+        assert sim["halted"] is None
+        assert sim["to_ms"] == pytest.approx(sim["data_to_ms"], abs=3_600_000)
+
+    def test_disabling_the_breaker_yields_more_trades(self, tight_limit):
+        stopped = backtest.run_portfolio_backtest(tight_limit, 10_000.0, progress=False)
+        full = backtest.run_portfolio_backtest(tight_limit, 10_000.0, progress=False,
+                                               halt_on_drawdown=False)
+
+        assert len(full["trades"]) > len(stopped["trades"])
+
+    def test_the_report_says_where_the_real_bot_would_have_stopped(self, tight_limit):
+        sim = backtest.run_portfolio_backtest(tight_limit, 10_000.0, progress=False,
+                                              halt_on_drawdown=False)
+
+        report = backtest.format_report(sim, tight_limit)
+
+        assert "Drawdown breaker УНТРААЛТТАЙ" in report
+        assert sim["breach_ms"] is not None
+        assert "дахь өдөр) зогсох байсан" in report
+
+    def test_the_live_drawdown_limit_is_restored_afterwards(self, tight_limit):
+        backtest.run_portfolio_backtest(tight_limit, 10_000.0, progress=False,
+                                        halt_on_drawdown=False)
+
+        assert risk.MAX_SESSION_DRAWDOWN_PCT == pytest.approx(0.5)
+
+    def test_a_run_that_never_breaches_says_so(self, monkeypatch, synthetic_market):
+        patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 99.0)
+
+        sim = backtest.run_portfolio_backtest(synthetic_market, 10_000.0, progress=False,
+                                              halt_on_drawdown=False)
+
+        assert sim["breach_ms"] is None
+        assert "Хязгаарт хүрээгүй" in backtest.format_report(sim, synthetic_market)
+
+    def test_breach_is_measured_on_realized_balance_like_the_live_breaker(self):
+        # Амьд breaker нь walletBalance (realized) хардаг, mark-to-market биш.
+        # (ts, mark_to_market, realized)
+        curve = [(0, 1000.0, 1000.0), (1, 700.0, 990.0), (2, 900.0, 800.0)]
+
+        assert backtest._drawdown_breach_ms(curve, 15.0) == 2      # 700 биш, 800 дээр
+        assert backtest._max_drawdown(curve) == pytest.approx(30.0)   # mark-to-market
+
+
+class TestBacktestNoHaltCli:
+    @pytest.fixture
+    def cli(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(backtest, "run", lambda **kw: (seen.update(kw), ({"trades": []}, "тайлан"))[1])
+        monkeypatch.setattr(backtest, "setup_logging", lambda *a, **kw: None)
+        monkeypatch.setattr(binance_client, "sync_server_time", lambda: None)
+        return seen
+
+    def test_no_halt_flag_turns_the_breaker_off(self, cli):
+        backtest.main(["--days", "90", "--no-halt"])
+
+        assert cli["halt_on_drawdown"] is False
+
+    def test_without_the_flag_the_breaker_stays_on(self, cli):
+        backtest.main(["--days", "90"])
+
+        assert cli["halt_on_drawdown"] is True
+
+
+class TestBacktestRunPlumbing:
+    """CLI → run() → run_portfolio_backtest гинжин холбоос.
+
+    Хоёр захыг нь тестлээд дундах давхаргыг орхивол тохиргоо чимээгүй
+    алдагдаж, тайлан нь өөрчлөлт хийгээгүй хуучин үр дүнг зөв мэт харуулна.
+    """
+
+    @pytest.fixture
+    def plumbing(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(backtest, "load_history", lambda *a, **kw: {"BTCUSDT": {}})
+        monkeypatch.setattr(backtest, "format_report", lambda sim, data=None: "тайлан")
+        monkeypatch.setattr(backtest, "run_portfolio_backtest",
+                            lambda data, balance, **kw: seen.update(kw) or {"trades": []})
+        return seen
+
+    def test_the_drawdown_flag_survives_the_middle_layer(self, plumbing):
+        backtest.run(days=30, start_balance=1000.0, halt_on_drawdown=False, progress=False)
+
+        assert plumbing["halt_on_drawdown"] is False
+
+    def test_the_drawdown_flag_defaults_to_on(self, plumbing):
+        backtest.run(days=30, start_balance=1000.0, progress=False)
+
+        assert plumbing["halt_on_drawdown"] is True
+
+    def test_the_disabled_list_survives_the_middle_layer(self, plumbing):
+        backtest.run(days=30, start_balance=1000.0, disabled=["BREAKOUT"], progress=False)
+
+        assert plumbing["disabled"] == ["BREAKOUT"]
+
+    def test_missing_data_is_reported_rather_than_crashing(self, monkeypatch):
+        monkeypatch.setattr(backtest, "load_history", lambda *a, **kw: {})
+
+        sim, report = backtest.run(days=30, start_balance=1000.0, progress=False)
+
+        assert sim is None
+        assert "Өгөгдөл татагдсангүй" in report

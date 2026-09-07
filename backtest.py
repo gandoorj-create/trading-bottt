@@ -70,7 +70,7 @@ def market_data_source(url):
 
 
 @contextmanager
-def simulation_mode(equity_getter):
+def simulation_mode(equity_getter, halt_on_drawdown=True):
     """Telegram, диск, баланс ба runtime state-ийг симуляц руу чиглүүлнэ.
 
     Ингэснээр risk.py-ийн жинхэнэ cooldown ба drawdown код backtest дотор
@@ -83,6 +83,9 @@ def simulation_mode(equity_getter):
     ажиллаж буй ботоо сүйтгэнэ. Тиймээс бүх атрибутыг хуулж аваад буцаана.
     """
     state_snapshot = dict(state.__dict__)
+    # Breaker-ыг унтраахдаа хязгаарыг нь 0 болгоно — check_drawdown_circuit_breaker
+    # тэр үед эрт буцдаг тул "хязгааргүй тохируулсан бот" яг ижил зан гаргана.
+    saved_drawdown_limit = risk.MAX_SESSION_DRAWDOWN_PCT
     saved = (
         notifications.send_telegram,
         persistence.save_strategy_state,
@@ -93,11 +96,14 @@ def simulation_mode(equity_getter):
     persistence.save_strategy_state = lambda: None
     persistence.save_session_state = lambda: None
     account.get_usdt_balance = equity_getter
+    if not halt_on_drawdown:
+        risk.MAX_SESSION_DRAWDOWN_PCT = 0.0
     try:
         yield
     finally:
         (notifications.send_telegram, persistence.save_strategy_state,
          persistence.save_session_state, account.get_usdt_balance) = saved
+        risk.MAX_SESSION_DRAWDOWN_PCT = saved_drawdown_limit
         state.__dict__.clear()
         state.__dict__.update(state_snapshot)
 
@@ -451,11 +457,14 @@ def _group_exec_bars(df, interval):
     return grouped
 
 
-def run_portfolio_backtest(data, start_balance, progress=True, disabled=None):
+def run_portfolio_backtest(data, start_balance, progress=True, disabled=None, halt_on_drawdown=True):
     """Ботын бүх мөчлөгийг түүхэн өгөгдөл дээр давтана.
 
     disabled: тухайн ажиллагаанд оролцуулахгүй стратегиудын нэр. `paused_cycles`
     нь 0 хэвээр тул update_strategy_cooldowns тэднийг дахин асаахгүй.
+    halt_on_drawdown: False үед circuit breaker унтарна. Одоогийн тохиргоогоор
+    бот эхний долоо хоногт хязгаартаа хүрч зогсдог тул урт хугацааны зан төлөв
+    хэмжигдэхгүй байсан — ямар ч `--days` утга ижил долоо хоногийг л хэмждэг.
     """
     symbols = list(data)
     if not symbols:
@@ -485,7 +494,7 @@ def run_portfolio_backtest(data, start_balance, progress=True, disabled=None):
     # сүүлийн барыг хөтөлж, тайланг түүгээр хэмжинэ.
     last_processed_ms = master[first]
 
-    with simulation_mode(equity):
+    with simulation_mode(equity, halt_on_drawdown=halt_on_drawdown):
         # Snapshot аль хэдийн авагдсаны ДАРАА цэвэрлэнэ — эс тэгвээс амьд
         # ботын state-ийг устгачихаад устсан хувилбарыг нь буцаана.
         state.reset()
@@ -588,7 +597,9 @@ def run_portfolio_backtest(data, start_balance, progress=True, disabled=None):
                     sim["pending"].append((symbol, "TIME_STOP"))
 
             unreal = _unrealized(sim, closes)
-            sim["equity_curve"].append((next_t, equity() + unreal))
+            # Хоёр утга: mark-to-market (жинхэнэ drawdown) ба realized (амьд
+            # breaker нь walletBalance хардаг тул түүнтэй ижил суурь)
+            sim["equity_curve"].append((next_t, equity() + unreal, equity()))
 
             if sim["open"] and unreal >= TARGET_PROFIT:
                 for symbol in sim["open"]:
@@ -626,6 +637,8 @@ def run_portfolio_backtest(data, start_balance, progress=True, disabled=None):
     sim["data_to_ms"] = master[-1] + HOUR_MS
     sim["symbols"] = symbols
     sim["disabled"] = sorted(disabled or [])
+    sim["halt_enabled"] = halt_on_drawdown
+    sim["breach_ms"] = _drawdown_breach_ms(sim["equity_curve"], MAX_SESSION_DRAWDOWN_PCT)
     return sim
 
 
@@ -652,15 +665,34 @@ def _bucket_stats(trades, key_fn, order=None):
     return rows
 
 
-def _max_drawdown(curve):
+def _max_drawdown(curve, column=1):
     if not curve:
         return 0.0
-    peak, worst = curve[0][1], 0.0
-    for _, value in curve:
+    peak, worst = curve[0][column], 0.0
+    for point in curve:
+        value = point[column]
         peak = max(peak, value)
         if peak > 0:
             worst = max(worst, (peak - value) / peak * 100)
     return worst
+
+
+def _drawdown_breach_ms(curve, limit_pct):
+    """Амьд breaker анх хэзээ буух байсан бэ (realized баланс дээр).
+
+    Halt унтраалттай ажиллуулахад "жинхэнэ бот энэ өдөр зогсох байсан" гэдгийг
+    харуулж, нэг ажиллагаанаас хоёр хариу авна: бүтэн хугацааны зан төлөв, мөн
+    одоогийн хязгаар хаана таслах вэ.
+    """
+    if not curve or not limit_pct or limit_pct <= 0:
+        return None
+    peak = curve[0][2]
+    for point in curve:
+        value = point[2]
+        peak = max(peak, value)
+        if peak > 0 and (peak - value) / peak * 100 >= limit_pct:
+            return point[0]
+    return None
 
 
 def _buy_and_hold(data, from_ms, to_ms, symbol="BTCUSDT"):
@@ -717,6 +749,16 @@ def format_report(sim, data=None):
     add(f"Дундаж барилт  {np.mean([t['hold_hours'] for t in trades]):.1f} цаг")
     if sim.get("halted"):
         add(f"⚠️ ЗОГССОН: {sim['halted']} ({when(sim['to_ms'])})")
+    if sim.get("halt_enabled") is False:
+        add("")
+        add(f"ℹ️ Drawdown breaker УНТРААЛТТАЙ ажилласан ({MAX_SESSION_DRAWDOWN_PCT:.0f}% хязгаар).")
+        breach = sim.get("breach_ms")
+        if breach:
+            reached = (breach - sim["from_ms"]) / (24 * HOUR_MS)
+            add(f"   Жинхэнэ бот {when(breach)}-нд ({reached:.0f} дахь өдөр) зогсох байсан;")
+            add("   түүнээс хойшхи тоонууд нь 'хязгааргүй байсан бол' гэсэн таамаг.")
+        else:
+            add("   Хязгаарт хүрээгүй — бүтэн хугацаанд арилжаалсан.")
 
     add("")
     add("─ ЗАРДЛЫН ЗАДАРГАА ─────────────────────────────────────────────────")
@@ -779,7 +821,7 @@ def format_report(sim, data=None):
 # ----------------------------------------------------------------
 
 def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress=True,
-        data_url=None, disabled=None):
+        data_url=None, disabled=None, halt_on_drawdown=True):
     symbols = symbols or SYMBOLS_POOL
     data = load_history(symbols, days, exec_interval=exec_interval, progress=progress, data_url=data_url)
     if not data:
@@ -790,7 +832,8 @@ def run(days=90, start_balance=None, symbols=None, exec_interval="15m", progress
         except Exception:
             start_balance = 10_000.0
     log.info(f"🧪 Симуляц эхэллээ: {len(data)} coin, ${start_balance:,.0f}")
-    sim = run_portfolio_backtest(data, start_balance, progress=progress, disabled=disabled)
+    sim = run_portfolio_backtest(data, start_balance, progress=progress, disabled=disabled,
+                                 halt_on_drawdown=halt_on_drawdown)
     if not sim:
         return None, "❌ Симуляц ажиллаагүй."
     return sim, format_report(sim, data)
@@ -827,6 +870,8 @@ def main(argv=None):
     parser.add_argument("--symbols", type=str, default=None, help="таслалаар тусгаарласан symbol-ууд")
     parser.add_argument("--exec-interval", type=str, default="15m",
                         help="гарц шийдэх лааны давтамж (15m/5m). 1h нь хамгийн бүдүүлэг.")
+    parser.add_argument("--no-halt", action="store_true",
+                        help="drawdown circuit breaker-ыг унтраан бүтэн хугацааг хэмжинэ")
     parser.add_argument("--disable", type=str, default=None,
                         help="оролцуулахгүй стратегиуд, таслалаар (ж: MACD_MOMENTUM,BREAKOUT)")
     parser.add_argument("--data-url", type=str, default=None,
@@ -849,7 +894,7 @@ def main(argv=None):
 
     sim, report = run(days=args.days, start_balance=args.balance, symbols=symbols,
                       exec_interval=args.exec_interval, data_url=args.data_url,
-                      disabled=disabled)
+                      disabled=disabled, halt_on_drawdown=not args.no_halt)
     print(report)
 
     if sim and args.csv:
