@@ -40,6 +40,16 @@ COST_BPS = (BACKTEST_FEE_RATE * 2 + BACKTEST_SLIPPAGE_RATE * 2) * 10_000
 SCORE_BUCKETS = ((0, 14, "<14"), (14, 18, "14-18"), (18, 22, "18-22"),
                  (22, 26, "22-26"), (26, 1e9, "26+"))
 
+# Нэр дэвшигч дохионууд. БҮГД "өндөр утгатайг нь long, багатайг нь short"
+# гэсэн нэг дүрмээр тооцогдоно — тиймээс СӨРӨГ үр дүн нь "эсрэгээр нь хийвэл
+# ажиллана" гэсэн үг. Ингэснээр нэг санааг хоёр тест болгож, олон
+# харьцуулалтын алдааг хиймлээр өсгөхгүй.
+CANDIDATE_LOOKBACKS = {"xs_mom_4": 4, "xs_mom_24": 24, "xs_mom_72": 72, "xs_mom_168": 168}
+VOL_WINDOW = 24
+# Эрэмбийн хэдэн хувийг авах вэ. 15 coin дээр 0.2 нь тал бүрээс 3.
+TOP_FRACTION = 0.2
+MIN_UNIVERSE = 5
+
 
 def _bucket(value):
     for low, high, label in SCORE_BUCKETS:
@@ -119,6 +129,111 @@ def build_observations(data, step=1, progress=True):
     return pd.DataFrame(rows)
 
 
+def _funding_lookup(funding):
+    """ts → тухайн үед хүчинтэй funding. backtest._funding_at нь дуудлага бүрт
+    бүх түүхийг гүйдэг — энд мөч тутам, symbol тутам дуудагдах тул хоёртын
+    хайлт болгоно."""
+    if not funding:
+        return lambda ts: None
+    times = np.array([f[0] for f in funding], dtype="int64")
+    rates = np.array([f[1] for f in funding], dtype=float)
+
+    def at(ts):
+        pos = int(np.searchsorted(times, ts, side="right")) - 1
+        return float(rates[pos]) if pos >= 0 else None
+
+    return at
+
+
+def build_candidate_observations(data, step=1, top_fraction=TOP_FRACTION, progress=True):
+    """Ботын стратегиудаас ХАМААРАЛГҮЙ нэр дэвшигч дохионуудыг хэмжинэ.
+
+    Бүгд хөндлөн огтлолын эрэмбэ: мөч бүрт бүх coin-ыг үзүүлэлтээр нь
+    эрэмбэлж, дээд хэсгийг long, доод хэсгийг short. Ийм бүтэц нь зах зээлийн
+    хөдөлгөөнийг БҮТЦЭЭРЭЭ хасдаг — яг тэр beta бузарлалт ботын бүх хэмжилтийг
+    хуурч байсан.
+
+    analyze_frame дуудагдахгүй тул энэ горим стратегийн горимоос олон дахин
+    хурдан.
+    """
+    symbols = list(data)
+    master = sorted(set().union(*[set(d["signal"]["time"]) for d in data.values()]))
+    index_by_time = {sym: dict(zip(d["signal"]["time"], range(len(d["signal"]))))
+                     for sym, d in data.items()}
+    closes = {sym: d["signal"]["close"].to_numpy(dtype=float) for sym, d in data.items()}
+    funding_at = {sym: _funding_lookup(d.get("funding") or []) for sym, d in data.items()}
+
+    max_h = max(HORIZONS)
+    warmup = max(max(CANDIDATE_LOOKBACKS.values()), VOL_WINDOW) + 1
+    # Стратегийн горимтой ижил цонх дээр хэмжинэ — эс тэгвээс хоёр горимын
+    # үр дүнг зэрэгцүүлэх боломжгүй.
+    first = max(warmup, backtest.SIGNAL_WINDOW)
+    last = len(master) - 1 - max_h
+    if last < first:
+        return pd.DataFrame()
+
+    rows = []
+    total = max(1, last - first)
+    for n, mi in enumerate(range(first, last + 1, step)):
+        t = master[mi]
+        forward, metrics = {}, {}
+        for sym in symbols:
+            i = index_by_time[sym].get(t)
+            if i is None or i < warmup:
+                continue
+            c = closes[sym]
+            if i + max_h >= len(c) or c[i] <= 0:
+                continue
+            forward[sym] = {h: c[i + h] / c[i] - 1.0 for h in HORIZONS}
+
+            values = {}
+            for name, lookback in CANDIDATE_LOOKBACKS.items():
+                past = c[i - lookback]
+                if past > 0:
+                    values[name] = c[i] / past - 1.0
+            window = c[i - VOL_WINDOW:i + 1]
+            if len(window) > 1 and np.all(window > 0):
+                values["vol_24"] = float(np.std(np.diff(window) / window[:-1]))
+            rate = funding_at[sym](t)
+            if rate is not None:
+                values["funding"] = rate
+            metrics[sym] = values
+
+        if len(forward) < MIN_UNIVERSE:
+            continue
+        market = {h: float(np.mean([f[h] for f in forward.values()])) for h in HORIZONS}
+
+        names = set()
+        for values in metrics.values():
+            names.update(values)
+        for name in sorted(names):
+            usable = {sym: values[name] for sym, values in metrics.items()
+                      if name in values and sym in forward}
+            if len(usable) < MIN_UNIVERSE:
+                continue
+            # Бүх утга ижил бол эрэмбэ утгагүй (жишээ нь funding бүгд 0).
+            if len(set(usable.values())) < 2:
+                continue
+            ordered = sorted(usable, key=usable.get)
+            k = max(1, int(len(ordered) * top_fraction))
+            sides = [(sym, -1.0) for sym in ordered[:k]] + [(sym, 1.0) for sym in ordered[-k:]]
+            for sym, direction in sides:
+                row = {
+                    "t": t, "symbol": sym, "strategy": name,
+                    "regime": "-", "score": 0.0,
+                    "side": "BUY" if direction > 0 else "SELL",
+                }
+                for h in HORIZONS:
+                    row[f"dir_{h}"] = direction * forward[sym][h]
+                    row[f"exc_{h}"] = direction * (forward[sym][h] - market[h])
+                rows.append(row)
+
+        if progress and n and n % 500 == 0:
+            log.info(f"   нэр дэвшигч {100 * (mi - first) / total:5.1f}%")
+
+    return pd.DataFrame(rows)
+
+
 def _matrix(df, prefix, key, lines, note="", step=1):
     """Бүлэг × горизонтын дундаж өгөөж (bps) ба хамгийн урт горизонтын t."""
     long_h = max(HORIZONS)
@@ -160,13 +275,15 @@ def _honest_tstat(df, column, horizon, step):
     return mean * 10_000, mean / (sd / np.sqrt(n)), n
 
 
-def build_report(df, data, step):
+def build_report(df, data, step, mode="strategy"):
     symbols = sorted(df["symbol"].unique())
     times = df["t"]
     span_h = (times.max() - times.min()) / backtest.HOUR_MS
 
+    title = ("🔬 ДОХИОНЫ ДАВУУ ТАЛ" if mode == "strategy"
+             else "🔬 НЭР ДЭВШИГЧ ДОХИОНУУД (хөндлөн огтлол)")
     lines = [
-        "🔬 ДОХИОНЫ ДАВУУ ТАЛ",
+        title,
         f"{len(symbols)} coin | {span_h / 24:.0f} хоног | {len(df):,} дохио | алхам {step}ц",
         f"Зардлын босго: {COST_BPS:.1f} bps (нэг эргэлт). Дохио үүнээс дээш "
         f"таамаглаж чадахгүй бол ямар ч тохиргоо аварахгүй.",
@@ -179,13 +296,18 @@ def build_report(df, data, step):
     _matrix(df, "exc", "strategy", lines, step=step,
             note="дээрхээс их зөрвөл ашиг нь зах зээлийн хөдөлгөөнөөс ирж байна")
 
-    lines.append("─ ИЛҮҮДЭЛ × ГОРИМ (bps) ───────────────────────────────────────────")
-    _matrix(df, "exc", "regime", lines, step=step)
+    if mode == "strategy":
+        lines.append("─ ИЛҮҮДЭЛ × ГОРИМ (bps) ───────────────────────────────────────────")
+        _matrix(df, "exc", "regime", lines, step=step)
 
-    df = df.copy()
-    df["bucket"] = df["score"].map(_bucket)
-    lines.append("─ ИЛҮҮДЭЛ × ОНОО (bps) — өндөр оноо үнэхээр дээр үү? ──────────────")
-    _matrix(df, "exc", "bucket", lines, step=step)
+        df = df.copy()
+        df["bucket"] = df["score"].map(_bucket)
+        lines.append("─ ИЛҮҮДЭЛ × ОНОО (bps) — өндөр оноо үнэхээр дээр үү? ──────────────")
+        _matrix(df, "exc", "bucket", lines, step=step)
+    else:
+        lines.append("  СӨРӨГ утга = эсрэгээр нь хийвэл ажиллана (жишээ нь өндөр")
+        lines.append("  funding-ийг short хийх). Тэмдгийг нь бүү үл тоо.")
+        lines.append("")
 
     lines.append("─ НИЙТ ДҮН ба ЗӨВ t-СТАТИСТИК ─────────────────────────────────────")
     lines.append(f"  {'горизонт':<12}{'чиглэл':>10}{'илүүдэл':>10}{'t':>8}{'мөч':>8}")
@@ -231,7 +353,8 @@ def build_report(df, data, step):
     return "\n".join(lines)
 
 
-def run(days=180, symbols=None, offset_days=0, step=1, data_url=None, progress=True):
+def run(days=180, symbols=None, offset_days=0, step=1, data_url=None,
+        candidates=False, progress=True):
     symbols = symbols or SYMBOLS_POOL
     # exec лаа энд хэрэггүй (гарц симуляц хийхгүй) тул 1h-ээр ачаалж,
     # 15m татах илүүдэл хугацаа/санах ойг хэмнэнэ.
@@ -239,10 +362,15 @@ def run(days=180, symbols=None, offset_days=0, step=1, data_url=None, progress=T
                                  data_url=data_url, offset_days=offset_days)
     if not data:
         return None, "❌ Өгөгдөл татагдсангүй."
-    df = build_observations(data, step=step, progress=progress)
+    if candidates:
+        df = build_candidate_observations(data, step=step, progress=progress)
+        mode = "candidate"
+    else:
+        df = build_observations(data, step=step, progress=progress)
+        mode = "strategy"
     if df.empty:
         return None, "❌ Дохио олдсонгүй."
-    return df, build_report(df, data, step)
+    return df, build_report(df, data, step, mode=mode)
 
 
 def main(argv=None):
@@ -253,6 +381,8 @@ def main(argv=None):
     parser.add_argument("--symbols", type=str, default=None, help="таслалаар тусгаарласан")
     parser.add_argument("--data-url", type=str, default=None)
     parser.add_argument("--csv", type=str, default=None, help="дохио бүрийг CSV-д бичих")
+    parser.add_argument("--candidates", action="store_true",
+                        help="ботын стратегиудын оронд нэр дэвшигч дохиог хэмжих")
     parser.add_argument("--telegram", action="store_true")
     args = parser.parse_args(argv)
     if args.step < 1:
@@ -265,7 +395,7 @@ def main(argv=None):
 
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     df, report = run(days=args.days, symbols=symbols, offset_days=args.offset_days,
-                     step=args.step, data_url=args.data_url)
+                     step=args.step, data_url=args.data_url, candidates=args.candidates)
     print(report)
     if df is not None and args.csv:
         df.to_csv(args.csv, index=False)
