@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 import backtest
+import market_data
 from settings import *
 from state import STRATEGY_NAMES
 from logging_setup import get_logger, setup_logging
@@ -354,7 +355,15 @@ def build_report(df, data, step, mode="strategy"):
 
 
 def run(days=180, symbols=None, offset_days=0, step=1, data_url=None,
-        candidates=False, progress=True):
+        candidates=False, top_symbols=0, progress=True):
+    source = data_url if data_url is not None else BACKTEST_DATA_URL
+    if top_symbols:
+        # Symbol сонголтыг ТҮҮХИЙН эндпойнтоос хийнэ — арилжааны данс (demo)
+        # дээр байхгүй хос сонгоод дараа нь өгөгдөл олдохгүй байхаас сэргийлнэ.
+        with backtest.market_data_source(source):
+            symbols = market_data.top_symbols_by_volume(top_symbols)
+        if progress:
+            log.info(f"📊 Эргэлтээр эрэмбэлсэн дээд {len(symbols)} хос")
     symbols = symbols or SYMBOLS_POOL
     # exec лаа энд хэрэггүй (гарц симуляц хийхгүй) тул 1h-ээр ачаалж,
     # 15m татах илүүдэл хугацаа/санах ойг хэмнэнэ.
@@ -379,6 +388,8 @@ def main(argv=None):
     parser.add_argument("--offset-days", type=int, default=0, help="цонхны төгсгөлийг ухраах")
     parser.add_argument("--step", type=int, default=1, help="хэдэн цаг тутамд дээж авах")
     parser.add_argument("--symbols", type=str, default=None, help="таслалаар тусгаарласан")
+    parser.add_argument("--top-symbols", type=int, default=0,
+                        help="эргэлтээр эрэмбэлсэн дээд N перпийг автоматаар авах")
     parser.add_argument("--data-url", type=str, default=None)
     parser.add_argument("--csv", type=str, default=None, help="дохио бүрийг CSV-д бичих")
     parser.add_argument("--candidates", action="store_true",
@@ -389,13 +400,18 @@ def main(argv=None):
         parser.error("--step дор хаяж 1 байх ёстой")
     if args.offset_days < 0:
         parser.error("--offset-days сөрөг байж болохгүй")
+    if args.top_symbols < 0:
+        parser.error("--top-symbols сөрөг байж болохгүй")
+    if args.top_symbols and args.symbols:
+        parser.error("--top-symbols ба --symbols хоёрын аль нэгийг сонгоно уу")
 
     setup_logging(STATE_DIR, STATE_DIR_IS_PERSISTENT)
     binance_client.sync_server_time()
 
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else None
     df, report = run(days=args.days, symbols=symbols, offset_days=args.offset_days,
-                     step=args.step, data_url=args.data_url, candidates=args.candidates)
+                     step=args.step, data_url=args.data_url, candidates=args.candidates,
+                     top_symbols=args.top_symbols)
     print(report)
     if df is not None and args.csv:
         df.to_csv(args.csv, index=False)

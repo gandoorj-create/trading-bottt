@@ -42,6 +42,42 @@ def load_exchange_info():
         state.symbol_info_cache[symbol] = info
 
 
+def top_symbols_by_volume(limit=80, quote="USDT"):
+    """24 цагийн эргэлтээр эрэмбэлсэн хамгийн идэвхтэй перп контрактууд.
+
+    Яагаад эргэлтээр эрэмбэлэх вэ: гүйлгээ багатай хосууд дээр бодит
+    slippage нь backtest-ийн таамаглаж буй 2 bps-ээс олон дахин их байдаг.
+    Жагсаалтын сүүлээс авбал хэмжилт өөрөө өөрийгөө хуурна — "давуу тал"
+    олоод, амьдаар spread-д нь идүүлнэ.
+    """
+    info = send_public_request_or_raise("/fapi/v1/exchangeInfo", "exchangeInfo")
+    tradable = {
+        item.get("symbol")
+        for item in info.get("symbols", [])
+        if item.get("contractType") == "PERPETUAL"
+        and item.get("status") == "TRADING"
+        and item.get("quoteAsset") == quote
+    }
+    tickers = send_public_request_or_raise("/fapi/v1/ticker/24hr", "ticker/24hr")
+    if not isinstance(tickers, list):
+        raise ValueError(f"ticker/24hr жагсаалт хүлээж байсан: {type(tickers).__name__}")
+    rows = [
+        (utils.safe_float(t.get("quoteVolume"), 0.0), t.get("symbol"))
+        for t in tickers if t.get("symbol") in tradable
+    ]
+    rows.sort(key=lambda row: (-row[0], row[1]))
+    return [symbol for _, symbol in rows[:limit]]
+
+
+def send_public_request_or_raise(path, label):
+    data = binance_client.send_public_request(path)
+    if isinstance(data, dict) and data.get("code") not in (None, 200):
+        raise ValueError(f"{label} алдаа: {data}")
+    if not isinstance(data, (dict, list)):
+        raise ValueError(f"{label} буруу хариу: {type(data).__name__}")
+    return data
+
+
 def get_symbol_info(symbol):
     if symbol not in state.symbol_info_cache:
         load_exchange_info()
