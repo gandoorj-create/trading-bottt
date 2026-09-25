@@ -288,7 +288,13 @@ def _robust_table(df, prefix, key, lines, title):
             f"{share:>9.0f}%{len(contribution):>6}{len(part):>7}"
         )
     lines.append("  Дундаж ≫ медиан бол цөөн цохилт үр дүнг татаж байна.")
-    lines.append("  дээд3хос % өндөр бол давуу тал биш, азтай хос.")
+    # Төвлөрлийг хосын тооноос хамааруулж унших ёстой: 8 хос дээр дээд 3 нь
+    # жигд тархсан ч 38% эзэлнэ, 59 хос дээр бол ердөө 5%. Хүлээгдэх утгыг
+    # нь хажууд нь бичихгүй бол энэ багана системтэйгээр буруу уншигдана.
+    universe = df["symbol"].nunique()
+    expected = 100 * min(3, universe) / universe if universe else 0.0
+    lines.append(f"  дээд3хос: жигд тархсан бол ~{expected:.0f}% ({universe} хос). "
+                 f"Үүнээс хамаагүй өндөр бол азтай хос.")
     lines.append("")
 
 
