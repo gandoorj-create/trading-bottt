@@ -255,6 +255,43 @@ def _matrix(df, prefix, key, lines, note="", step=1):
     lines.append("")
 
 
+def _trimmed_mean(values, fraction=0.1):
+    """Хоёр талаас нь fraction хувийг хаясан дундаж."""
+    ordered = np.sort(np.asarray(values, dtype=float))
+    cut = int(len(ordered) * fraction)
+    if len(ordered) - 2 * cut < 1:
+        return float(np.mean(ordered))
+    return float(np.mean(ordered[cut:len(ordered) - cut]))
+
+
+def _robust_table(df, prefix, key, lines, title):
+    """Дундаж, медиан, тайруулсан дундаж, хосын төвлөрөл.
+
+    Яагаад хэрэгтэй вэ: дундаж нь цөөн хэдэн аварга хөдөлгөөнд бүрэн
+    захирагддаг. "Дундаж +375 bps, медиан +5 bps" гэдэг нь давуу тал биш,
+    хэдэн азын цохилт гэсэн үг. Мөн үр дүн 2-3 хос дээр төвлөрсөн бол тэр
+    нь стратегийн шинж биш, тэдгээр хосын тухайн үеийн түүх юм.
+    """
+    column = f"{prefix}_{max(HORIZONS)}"
+    lines.append(title)
+    lines.append(f"  {'':<22}{'дундаж':>9}{'медиан':>9}{'тайр10%':>9}{'дээд3хос':>10}{'хос':>6}{'n':>7}")
+    groups = sorted(df.groupby(key), key=lambda item: -item[1][column].mean())
+    for label, part in groups:
+        values = part[column].to_numpy(dtype=float)
+        contribution = part.groupby("symbol")[column].sum()
+        magnitude = float(contribution.abs().sum())
+        share = 100 * float(contribution.abs().nlargest(3).sum()) / magnitude if magnitude > 0 else 0.0
+        lines.append(
+            f"  {str(label):<22}{values.mean() * 10_000:>9.1f}"
+            f"{float(np.median(values)) * 10_000:>9.1f}"
+            f"{_trimmed_mean(values) * 10_000:>9.1f}"
+            f"{share:>9.0f}%{len(contribution):>6}{len(part):>7}"
+        )
+    lines.append("  Дундаж ≫ медиан бол цөөн цохилт үр дүнг татаж байна.")
+    lines.append("  дээд3хос % өндөр бол давуу тал биш, азтай хос.")
+    lines.append("")
+
+
 def _honest_tstat(df, column, horizon, step):
     """Давхцал ба symbol хоорондын хамаарлыг тооцсон t-статистик.
 
@@ -305,10 +342,16 @@ def build_report(df, data, step, mode="strategy"):
         df["bucket"] = df["score"].map(_bucket)
         lines.append("─ ИЛҮҮДЭЛ × ОНОО (bps) — өндөр оноо үнэхээр дээр үү? ──────────────")
         _matrix(df, "exc", "bucket", lines, step=step)
+        _robust_table(df, "exc", "bucket", lines,
+                      "─ OUTLIER ШАЛГАЛТ × ОНОО (24ц, bps) ───────────────────────────────")
+        _robust_table(df, "exc", "strategy", lines,
+                      "─ OUTLIER ШАЛГАЛТ × СТРАТЕГИ (24ц, bps) ────────────────────────────")
     else:
         lines.append("  СӨРӨГ утга = эсрэгээр нь хийвэл ажиллана (жишээ нь өндөр")
         lines.append("  funding-ийг short хийх). Тэмдгийг нь бүү үл тоо.")
         lines.append("")
+        _robust_table(df, "exc", "strategy", lines,
+                      "─ OUTLIER ШАЛГАЛТ (24ц, bps) ───────────────────────────────────────")
 
     lines.append("─ НИЙТ ДҮН ба ЗӨВ t-СТАТИСТИК ─────────────────────────────────────")
     lines.append(f"  {'горизонт':<12}{'чиглэл':>10}{'илүүдэл':>10}{'t':>8}{'мөч':>8}")
@@ -334,8 +377,12 @@ def build_report(df, data, step, mode="strategy"):
     threshold = 3.0 if n_strategies > 1 else 2.0
 
     lines.append("─ ДҮГНЭЛТ ─────────────────────────────────────────────────────────")
+    best_part = df[df["strategy"] == best_name]["exc_24"].to_numpy(dtype=float)
+    best_median = float(np.median(best_part)) * 10_000
     lines.append(f"  Хамгийн сайн: {best_name} — 24ц илүүдэл {best_bps:.1f} bps, "
                  f"t={best_t:.2f} ({best_periods} мөч)")
+    lines.append(f"  Медиан {best_median:.1f} bps — дунджаас олон дахин бага бол "
+                 f"цөөн цохилтын үр дүн.")
     lines.append(f"  Зардлын босго {COST_BPS:.1f} bps | нийт илүүдлийн t = {overall_t:.2f}")
     if n_strategies > 1:
         lines.append(f"  ({n_strategies} стратегийн ХАМГИЙН САЙНЫГ сонгосон тул t босго = {threshold:.0f})")
