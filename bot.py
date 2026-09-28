@@ -3,6 +3,7 @@ bot.py
 Оруулах цэг: тохиргоо шалгах, эхлүүлэх, үндсэн давталт.
 """
 from datetime import datetime
+import os
 import time
 import traceback
 from telegram_format import format_block
@@ -24,6 +25,74 @@ import utils
 from logging_setup import get_logger, setup_logging
 
 log = get_logger(__name__)
+
+# Нэг алдаа давтагдахад Telegram-ыг хэр олон удаа мэдэгдэх вэ.
+ERROR_ALERT_REPEAT_SEC = 1800
+
+
+class ErrorAlertThrottle:
+    """Ижил алдааг давтан мэдэгдэхгүй.
+
+    Гол гогцоо алдаа бүрийн дараа 30 сек унтдаг тул тогтмол алдаа цагт 120
+    мессеж болж, Telegram rate-limit-д оруулдаг — тэр үед жинхэнэ дохио
+    (drawdown зогсолт) хүрэхгүй. Шинэ төрлийн алдааг тэр дор нь, ижил алдааг
+    repeat_sec тутамд нэг л удаа, хэдэн удаа давтагдсаныг нь хамт мэдэгдэнэ.
+    """
+
+    # Хэдэн өөр алдааг санах вэ — хязгааргүй өсөхгүйн тулд.
+    MAX_TRACKED = 50
+
+    def __init__(self, repeat_sec=ERROR_ALERT_REPEAT_SEC, clock=time.time):
+        self.repeat_sec = repeat_sec
+        self.clock = clock
+        # signature → [сүүлд илгээсэн мөч, түүнээс хойш дарагдсан тоо]. Алдаа
+        # бүрийг ТУСАД нь хянана: зөвхөн сүүлийнхийг санавал хоёр алдаа
+        # ээлжлэн гарахад бүгд "шинэ" болж шүүлтийг бүрэн тойрно.
+        self.seen = {}
+
+    def should_send(self, error):
+        """(илгээх эсэх, сүүлийн мэдэгдлээс хойш дарагдсан тоо)."""
+        # Traceback биш зөвхөн төрөл+мессеж: мөрийн дугаар өөрчлөгдөхөд ижил
+        # алдаа "шинэ" мэт харагдахгүй.
+        signature = f"{type(error).__name__}: {error}"[:200]
+        now = self.clock()
+        entry = self.seen.get(signature)
+        if entry is None or now - entry[0] >= self.repeat_sec:
+            repeated = entry[1] if entry else 0
+            self.seen[signature] = [now, 0]
+            if len(self.seen) > self.MAX_TRACKED:
+                oldest = min(self.seen, key=lambda key: self.seen[key][0])
+                del self.seen[oldest]
+            return True, repeated
+        entry[1] += 1
+        return False, entry[1]
+
+
+def run_initial_trades():
+    """Эхлэх үеийн арилжаа — breaker-ийн шалгалтын ДАРАА.
+
+    Өмнө нь энэ арилжаа гол гогцооны breaker-ээс өмнө ажилладаг байсан тул
+    зогссон ботыг redeploy хийхэд 6 хүртэл позиц нээгээд, 30 секундын дараа
+    breaker дахин цохиж бүгдийг хаадаг байв — шимтгэл, slippage дэмий.
+
+    Буцаах утга: арилжааг оролдсон эсэх.
+    """
+    try:
+        risk.check_drawdown_circuit_breaker()
+    except Exception as e:
+        log.error(f"❌ Drawdown check: {e}")
+    if state.drawdown_halt or state.safety_lock:
+        log.warning("⏸️ Эхлэх арилжааг алгаслаа — бот зогссон төлөвт байна")
+        return False
+
+    try:
+        selected = screening.screen_coins()
+        execution.execute_trades(selected, account.get_usdt_balance())
+    except Exception as e:
+        error = traceback.format_exc()
+        log.error(f"❌ Initial error:\n{error}")
+        notifications.send_telegram(format_block("АНХНЫ АЛДАА", "❌", [("Error", str(e)[:400])]))
+    return True
 
 
 def main():
@@ -85,6 +154,8 @@ def main():
             state.session_peak_balance = _restored_peak
         state.session_realized_pnl = utils.safe_float(_saved_session.get("session_realized_pnl"), 0.0)
         log.info(f"♻️ Restored session state — peak ${state.session_peak_balance:,.2f}, realized ${state.session_realized_pnl:,.2f}")
+    # Зогсолт нь дээрх 24 цагийн шалгалтын ГАДНА — хугацаа өнгөрөхөд арилах ёсгүй.
+    risk.restore_drawdown_halt(_saved_session, os.environ.get(risk.HALT_RESET_ENV))
     persistence.save_session_state()
 
     notifications.send_telegram(
@@ -120,17 +191,12 @@ def main():
         except Exception as e:
             log.error(f"❌ Backtest error: {e}")
 
-    try:
-        selected = screening.screen_coins()
-        execution.execute_trades(selected, account.get_usdt_balance())
-    except Exception as e:
-        error = traceback.format_exc()
-        log.error(f"❌ Initial error:\n{error}")
-        notifications.send_telegram(format_block("АНХНЫ АЛДАА", "❌", [("Error", str(e)[:400])]))
+    run_initial_trades()
 
     last_selection_time = time.time()
     performance_report_time = time.time()
     cycle_count = 0
+    error_alerts = ErrorAlertThrottle()
 
     while True:
         try:
@@ -267,10 +333,15 @@ def main():
         except Exception as e:
             error = traceback.format_exc()
             log.error(f"❌ MAIN ERROR\n{error}")
-            try:
-                notifications.send_telegram(format_block("ГОЛ АЛДАА", "❌", [("Traceback", error[:500])]))
-            except Exception:
-                pass
+            send, repeated = error_alerts.should_send(e)
+            if send:
+                rows = [("Traceback", error[:500])]
+                if repeated:
+                    rows.append(("Давтагдсан", f"сүүлийн мэдэгдлээс хойш {repeated} удаа"))
+                try:
+                    notifications.send_telegram(format_block("ГОЛ АЛДАА", "❌", rows))
+                except Exception:
+                    pass
             time.sleep(30)
 
 

@@ -2,6 +2,7 @@
 risk.py
 Эрсдэлийн хяналт: drawdown circuit breaker, стратегийн түр зогсоолт, realized PnL бүртгэл.
 """
+import time
 from telegram_format import format_block
 from settings import *
 from state import state
@@ -132,6 +133,10 @@ def check_drawdown_circuit_breaker():
         state.safety_lock = True
         state.drawdown_lock_active = True
         state.drawdown_halt = True
+        state.drawdown_halted_at = int(time.time())
+        # Telegram-аас ӨМНӨ дискэнд бичнэ: мессеж гацсан ч, процесс тэр дороо
+        # алагдсан ч зогсолт restart-ыг даана.
+        persistence.save_session_state()
         log.error(f"🚨 MAX DRAWDOWN HIT: {drawdown_pct:.2f}% (limit {MAX_SESSION_DRAWDOWN_PCT}%) — HARD STOP")
         notifications.send_telegram(
             format_block(
@@ -143,10 +148,69 @@ def check_drawdown_circuit_breaker():
                     ("Drawdown", f"{drawdown_pct:.2f}% (limit {MAX_SESSION_DRAWDOWN_PCT:.1f}%)"),
                     ("", ""),
                     ("Статус", "БОТ БҮРМӨСӨН ЗОГСЛОО"),
-                    ("Дараагийн алхам", "Бүх позиц хаагдана. Гараар restart хийтэл автоматаар үргэлжлэхгүй"),
+                    ("Дараагийн алхам", "Бүх позиц хаагдана. Restart/redeploy ч сэргээхгүй"),
+                    ("Сэргээх", f"{HALT_RESET_ENV}={halt_reset_token(state.drawdown_halted_at)} тавиад redeploy"),
                 ]
             )
         )
+
+
+# Зогсолтыг гараар цэвэрлэх орчны хувьсагч. Утга нь зогссон ӨДӨР байх ёстой —
+# "1" гэх мэт байнгын утга зөвшөөрвөл тэр хувьсагч мартагдан үлдэж, дараагийн
+# зогсолтыг ч мөн чимээгүй цэвэрлэнэ. Өдрөөр холбосноор нэг л зогсолтыг
+# цэвэрлэх бөгөөд хэрэглэгч ямар алдагдлыг хүлээн зөвшөөрч байгаагаа мэднэ.
+HALT_RESET_ENV = "RESET_DRAWDOWN_HALT"
+
+
+def halt_reset_token(halted_at):
+    """Зогсолтыг цэвэрлэх түлхүүр: зогссон UTC өдөр (YYYY-MM-DD)."""
+    stamp = utils.safe_float(halted_at, 0.0)
+    if stamp <= 0:
+        return "unknown"
+    return time.strftime("%Y-%m-%d", time.gmtime(stamp))
+
+
+def restore_drawdown_halt(saved, reset_token=None):
+    """Өмнөх ажиллагааны drawdown зогсолтыг сэргээнэ.
+
+    Peak-ээс ялгаатай нь зогсолтод 24 цагийн хугацаа БАЙХГҮЙ: зогсолт бол
+    хүний шийдвэр шаардах төлөв, хугацаа өнгөрөхөд өөрөө арилах ёсгүй.
+
+    Буцаах утга: True = зогссон хэвээр.
+    """
+    if not isinstance(saved, dict) or not saved.get("drawdown_halt"):
+        return False
+
+    halted_at = utils.safe_float(saved.get("drawdown_halted_at"), 0.0) or None
+    token = halt_reset_token(halted_at)
+
+    if reset_token and reset_token.strip() == token:
+        state.drawdown_halt = False
+        state.safety_lock = False
+        state.drawdown_lock_active = False
+        state.drawdown_halted_at = None
+        # Хэрэглэгч алдагдлыг хүлээн зөвшөөрсөн тул одоогийн баланснаас эхэлнэ.
+        # Хуучин peak-ийг үлдээвэл breaker эхний шалгалтаар дахин цохино.
+        state.session_peak_balance = state.session_start_balance
+        log.warning(f"🔓 Drawdown зогсолтыг гараар цэвэрлэлээ ({token})")
+        notifications.send_telegram(format_block("DRAWDOWN ЗОГСОЛТ ЦЭВЭРЛЭГДЛЭЭ", "🔓", [
+            ("Зогссон өдөр", token),
+            ("Шинэ peak", f"${state.session_peak_balance:,.2f}"),
+            ("Анхаар", f"{HALT_RESET_ENV}-ыг одоо устгаарай"),
+        ]))
+        return False
+
+    state.drawdown_halt = True
+    state.safety_lock = True
+    state.drawdown_lock_active = True
+    state.drawdown_halted_at = int(halted_at) if halted_at else None
+    log.error(f"🚨 Өмнөх drawdown зогсолт хүчинтэй хэвээр ({token}) — арилжаа хийхгүй")
+    notifications.send_telegram(format_block("БОТ ЗОГССОН ХЭВЭЭР", "🚨", [
+        ("Шалтгаан", "Өмнөх ажиллагаанд drawdown хязгаарт хүрсэн"),
+        ("Зогссон өдөр", token),
+        ("Сэргээх", f"{HALT_RESET_ENV}={token} тавиад redeploy"),
+    ]))
+    return True
 
 
 def update_strategy_cooldowns():

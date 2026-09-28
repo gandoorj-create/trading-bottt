@@ -4575,3 +4575,245 @@ class TestWalkForwardReport:
         report = backtest.format_walk_forward_report([], 30, 10_000.0)
 
         assert "Ямар ч цонх ажиллаагүй" in report
+
+
+# ----------------------------------------------------------------
+# Drawdown зогсолт restart/redeploy-г даах ёстой
+# ----------------------------------------------------------------
+import bot
+
+
+def _trip_breaker(monkeypatch, peak=1000.0, balance=800.0):
+    patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 15.0)
+    monkeypatch.setattr(bot_state, "session_peak_balance", peak)
+    monkeypatch.setattr(account, "get_usdt_balance", lambda: balance)
+    risk.check_drawdown_circuit_breaker()
+
+
+def _restart():
+    """Процесс дахин эхэлсэнтэй адил: санах ой бүрэн цэвэрлэгдэж, диск үлдэнэ."""
+    bot_state.reset()
+
+
+class TestDrawdownHaltSurvivesRestart:
+    def test_tripping_the_breaker_writes_the_halt_to_disk(self, monkeypatch):
+        _trip_breaker(monkeypatch)
+        saved = persistence.load_session_state()
+        assert saved["drawdown_halt"] is True
+        assert saved["drawdown_halted_at"] > 0
+
+    def test_the_halt_is_restored_after_a_restart(self, monkeypatch):
+        _trip_breaker(monkeypatch)
+        _restart()
+        assert bot_state.drawdown_halt is False  # санах ой цэвэрлэгдсэн
+        assert risk.restore_drawdown_halt(persistence.load_session_state()) is True
+        assert bot_state.drawdown_halt is True
+        assert bot_state.safety_lock is True
+
+    def test_the_halt_does_not_expire_the_way_the_peak_does(self, monkeypatch, isolated_state_files):
+        _trip_breaker(monkeypatch)
+        path = isolated_state_files / "session_state.json"
+        data = json.loads(path.read_text())
+        data["saved_at"] -= 7 * 86400  # долоо хоногийн өмнө хадгалсан
+        path.write_text(json.dumps(data))
+        _restart()
+        assert risk.restore_drawdown_halt(persistence.load_session_state()) is True
+
+    def test_the_dated_token_clears_the_halt_and_starts_a_fresh_peak(self, monkeypatch):
+        _trip_breaker(monkeypatch)
+        saved = persistence.load_session_state()
+        token = risk.halt_reset_token(saved["drawdown_halted_at"])
+        _restart()
+        bot_state.session_start_balance = 800.0
+        bot_state.session_peak_balance = 1000.0  # 24ц дотор сэргээгдсэн хуучин peak
+        assert risk.restore_drawdown_halt(saved, token) is False
+        assert bot_state.drawdown_halt is False
+        assert bot_state.safety_lock is False
+        # Хуучин peak үлдвэл breaker эхний шалгалтаар тэр дороо дахин цохино.
+        assert bot_state.session_peak_balance == 800.0
+
+    def test_a_stale_or_generic_token_does_not_clear_a_halt(self, monkeypatch):
+        # Өмнөх зогсолтын түлхүүр орчинд мартагдан үлдсэн ч, "1" гэж
+        # тавьсан ч шинэ зогсолт чимээгүй цэвэрлэгдэх ёсгүй.
+        _trip_breaker(monkeypatch)
+        saved = persistence.load_session_state()
+        for token in ("2020-01-01", "1", "true", ""):
+            _restart()
+            assert risk.restore_drawdown_halt(saved, token) is True, token
+            assert bot_state.drawdown_halt is True
+
+    def test_the_halt_alert_says_exactly_how_to_clear_it(self, monkeypatch, telegram_messages):
+        _trip_breaker(monkeypatch)
+        token = risk.halt_reset_token(bot_state.drawdown_halted_at)
+        assert any(f"{risk.HALT_RESET_ENV}={token}" in m for m in telegram_messages)
+
+    def test_nothing_saved_means_nothing_restored(self):
+        assert risk.restore_drawdown_halt(None) is False
+        assert risk.restore_drawdown_halt({"session_peak_balance": 1.0}) is False
+        assert bot_state.drawdown_halt is False
+
+
+class TestStartupTradesRespectTheBreaker:
+    @pytest.fixture
+    def calls(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(screening, "screen_coins", lambda: seen.append("screen") or [])
+        monkeypatch.setattr(execution, "execute_trades", lambda selected, balance: seen.append("execute"))
+        return seen
+
+    def test_a_restored_halt_blocks_startup_trading(self, monkeypatch, calls):
+        _trip_breaker(monkeypatch)
+        _restart()
+        risk.restore_drawdown_halt(persistence.load_session_state())
+        assert bot.run_initial_trades() is False
+        assert calls == []
+
+    def test_the_breaker_runs_before_trading_even_without_a_saved_flag(self, monkeypatch, calls):
+        # Энэ засвараас өмнөх state файл: peak бий, зогсолтын туг алга.
+        # Өмнө нь эхлэх арилжаа breaker-ээс ӨМНӨ ажиллаж, позиц нээдэг байв.
+        patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 15.0)
+        bot_state.session_peak_balance = 1000.0
+        monkeypatch.setattr(account, "get_usdt_balance", lambda: 800.0)
+        assert bot.run_initial_trades() is False
+        assert calls == []
+        assert bot_state.drawdown_halt is True
+
+    def test_a_healthy_start_still_trades(self, monkeypatch, calls):
+        patch_setting(monkeypatch, "MAX_SESSION_DRAWDOWN_PCT", 15.0)
+        bot_state.session_peak_balance = 1000.0
+        monkeypatch.setattr(account, "get_usdt_balance", lambda: 990.0)
+        assert bot.run_initial_trades() is True
+        assert calls == ["screen", "execute"]
+
+
+class TestErrorAlertThrottle:
+    @pytest.fixture
+    def clock(self):
+        return [1000.0]
+
+    @pytest.fixture
+    def throttle(self, clock):
+        return bot.ErrorAlertThrottle(repeat_sec=1800, clock=lambda: clock[0])
+
+    def test_the_first_occurrence_is_sent(self, throttle):
+        assert throttle.should_send(ValueError("boom")) == (True, 0)
+
+    def test_repeats_are_suppressed_then_reported_with_a_count(self, throttle, clock):
+        throttle.should_send(ValueError("boom"))
+        for _ in range(59):  # 30 сек тутам, 1770 сек хүртэл
+            clock[0] += 30
+            assert throttle.should_send(ValueError("boom"))[0] is False
+        clock[0] += 30  # яг 1800 сек
+        assert throttle.should_send(ValueError("boom")) == (True, 59)
+
+    def test_a_new_kind_of_error_is_sent_immediately(self, throttle, clock):
+        throttle.should_send(ValueError("boom"))
+        clock[0] += 30
+        assert throttle.should_send(KeyError("other"))[0] is True
+
+    def test_an_hour_of_one_error_is_two_alerts_not_120(self, throttle, clock):
+        sent = 0
+        for _ in range(120):
+            sent += throttle.should_send(RuntimeError("API down"))[0]
+            clock[0] += 30
+        assert sent == 2
+
+    def test_two_alternating_errors_cannot_bypass_the_limit(self, throttle, clock):
+        sent = 0
+        for i in range(120):
+            error = RuntimeError("A") if i % 2 else KeyError("B")
+            sent += throttle.should_send(error)[0]
+            clock[0] += 30
+        assert sent == 4  # тус бүр 0 ба ~1800 секундэд
+
+    def test_the_tracked_set_stays_bounded(self, throttle, clock):
+        for i in range(500):
+            throttle.should_send(ValueError(f"unique {i}"))
+            clock[0] += 1
+        assert len(throttle.seen) <= bot.ErrorAlertThrottle.MAX_TRACKED
+
+
+class TestBootingAHaltedBot:
+    """main()-ийг бүхэлд нь ажиллуулна.
+
+    Функц бүр тусдаа тестлэгдсэн ч тэдгээрийг холбосон дунд давхарга энэ
+    төсөлд гурван удаа алдаатай байсан. Энд: сэргээлт peak-ийн ДАРАА, эхлэх
+    арилжаанаас ӨМНӨ ажиллаж байгаа эсэхийг жинхэнэ дарааллаар нь шалгана.
+    """
+
+    @pytest.fixture
+    def boot(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(bot, "setup_logging", lambda *a, **k: None)
+        monkeypatch.setattr(bot, "validate_config", lambda: None)
+        monkeypatch.setattr(persistence, "check_state_storage", lambda: True)
+        monkeypatch.setattr(binance_client, "sync_server_time", lambda: None)
+        monkeypatch.setattr(market_data, "load_exchange_info", lambda: None)
+        monkeypatch.setattr(account, "get_position_mode", lambda: None)
+        monkeypatch.setattr(position_manager, "sync_existing_positions", lambda: None)
+        monkeypatch.setattr(account, "get_positions", lambda: [])
+        monkeypatch.setattr(position_manager, "close_all_positions_and_verify",
+                            lambda: calls.append("close_all"))
+        monkeypatch.setattr(screening, "screen_coins", lambda: calls.append("screen") or [])
+        monkeypatch.setattr(execution, "execute_trades", lambda s, b: calls.append("execute"))
+
+        # Гогцооноос гарах: KeyboardInterrupt нь Exception биш тул дотоод
+        # try-уудыг нэвтэрч main()-ийн өөрийн break-т хүрнэ.
+        def stop(*_args, **_kwargs):
+            raise KeyboardInterrupt
+        monkeypatch.setattr(bot.time, "sleep", stop)            # зогссон зам
+        monkeypatch.setattr(news, "check_news_status", stop)    # хэвийн зам
+        return calls
+
+    def test_redeploying_a_halted_bot_opens_nothing(self, monkeypatch, boot):
+        monkeypatch.delenv(risk.HALT_RESET_ENV, raising=False)
+        _trip_breaker(monkeypatch)
+        _restart()
+        monkeypatch.setattr(account, "get_usdt_balance", lambda: 800.0)
+
+        bot.main()
+
+        assert "screen" not in boot and "execute" not in boot
+        assert bot_state.drawdown_halt is True
+
+    def test_the_reset_token_lets_it_trade_again(self, monkeypatch, boot):
+        _trip_breaker(monkeypatch)
+        token = risk.halt_reset_token(bot_state.drawdown_halted_at)
+        _restart()
+        monkeypatch.setenv(risk.HALT_RESET_ENV, token)
+        monkeypatch.setattr(account, "get_usdt_balance", lambda: 800.0)
+
+        bot.main()
+
+        # Peak (1000) 24ц дотор сэргээгдсэн — сэргээлт түүний ДАРАА ажиллаж
+        # peak-ийг 800 болгохгүй бол breaker тэр дороо дахин цохиж худалдахгүй.
+        assert boot[:2] == ["screen", "execute"]
+        assert bot_state.drawdown_halt is False
+
+    def test_a_repeating_loop_error_alerts_once_not_every_cycle(self, monkeypatch, boot, telegram_messages):
+        monkeypatch.delenv(risk.HALT_RESET_ENV, raising=False)
+        monkeypatch.setattr(account, "get_usdt_balance", lambda: 1000.0)
+        monkeypatch.setattr(news, "check_news_status", lambda: None)
+        monkeypatch.setattr(position_manager, "monitor_positions", lambda: None)
+        # handle_target_reached нь гогцоонд try-гүй дуудагддаг тул алдаа нь
+        # гадна талын handler-т хүрнэ — яг тэр handler-ыг шалгах гэж байна.
+        monkeypatch.setattr(account, "get_positions", lambda: [{"unRealizedProfit": 10_000.0}])
+
+        def explode(_total):
+            raise RuntimeError("target handler exploded")
+        monkeypatch.setattr(position_manager, "handle_target_reached", explode)
+
+        sleeps = []
+
+        def counting_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) >= 5:
+                raise KeyboardInterrupt
+        monkeypatch.setattr(bot.time, "sleep", counting_sleep)
+
+        with pytest.raises(KeyboardInterrupt):
+            bot.main()
+
+        alerts = [m for m in telegram_messages if "ГОЛ АЛДАА" in m]
+        assert len(sleeps) == 5  # гогцоо үнэхээр 5 удаа эргэсэн
+        assert len(alerts) == 1

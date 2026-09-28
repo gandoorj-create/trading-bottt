@@ -105,6 +105,10 @@ def save_session_state():
             # restart-ын дараа позицуудыг "RECOVERED" биш, жинхэнэ стратегиэрээ
             # таньж, статистикт нь зөв тооцох боломжтой болно.
             "active_trades": state.active_trade_info,
+            # Зогсолтыг хадгалахгүй бол restart бүр түүнийг "уучилна" — бот
+            # 15%-д зогссон байтал redeploy хийхэд шинэ позиц нээдэг байв.
+            "drawdown_halt": state.drawdown_halt,
+            "drawdown_halted_at": state.drawdown_halted_at,
             "saved_at": int(time.time()),
         }, indent=2), encoding="utf-8")
         tmp.replace(path)

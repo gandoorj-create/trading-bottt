@@ -61,6 +61,8 @@ class BotState:
         self.safety_lock = False
         self.drawdown_lock_active = False
         self.drawdown_halt = False
+        # Зогссон мөч (unix sec). Гараар сэргээх түлхүүрийг эндээс гаргана.
+        self.drawdown_halted_at = None
         self.unprotected_symbols = set()
 
         # ---- Нээлттэй арилжаа ----
